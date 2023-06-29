@@ -1,0 +1,82 @@
+Grammar specification using eBNF-like syntax:
+
+program      = declaration* EOF ;
+
+declaration  = classDecl
+             | funDecl
+             | varDecl
+             | statement ;
+
+classDecl    = "class" IDENTIFIER ( "<" IDENTIFIER )?
+             "{" function* "}" ;
+funDecl      = "fun" function;
+function     = IDENTIFIER "(" parameters? ")" block ;
+
+varDecl      = "var" IDENTIFIER ( "=" expression )? ";" ;
+
+statement    = assertStmt
+             | printStmt
+             | breakStmt
+             | continueStmt
+             | returnStmt
+             | ifStmt
+             | whileStmt
+             | forStmt
+             | block
+             | exprStmt ;
+
+assertStmt   = "assert" expression ";" ;
+printStmt    = "print" expression ";" ;
+breakStmt    = "break" ";" ;
+continueStmt = "continue" ";" ;
+returnStmt   = "return" expression? ";" ;
+ifStmt       = "if" "(" expression ")" statement
+             ( "else" statement )? ;
+whileStmt    = "while" "(" expression ")" statement ;
+forStmt      = "for" "(" ( varDecl | exprStmt | ";" )
+                expression? ";"
+                expression? ";" ")" statement ;
+block        = "{" declaration* "}" ;
+exprStmt     = expression ";" ;
+
+expression   = assignment ;
+assignment   = ( call "." )? IDENTIFIER "=" assignment
+             | ternary ;
+ternary      = logic_or "?" expression ":" ternary
+             | logic_or ;
+logic_or     = logic_and ( "or" logic_and )* ;
+logic_and    = equality ( "and" equality )* ;
+equality     = comparison ( ( "==" | "!=" ) comparison )* ;
+comparison   = term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
+term         = factor ( ( "+" | "-" ) factor )* ;
+factor       = unary ( ( "/" | "*" ) unary )* ;
+unary        = ( "!" | "-" | "+" ) unary
+             | call ;
+call         = primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
+primary      = "true" | "false" | "nil" | "this"
+             | NUMBER | STRING | IDENTIFIER
+             | "(" expression ")"
+             |  "super" "." IDENTIFIER ;
+
+arguments    = expression ( "," expression )* ;
+parameters   = IDENTIFIER ( "," IDENTIFIER )* ;
+
+
+
+Information from grammar:
+
+In increasing order of precedence:
+=======================================
+Name        |   Operator  |  Associates
+============|=============|============
+Assignment  |  =          |  Right
+Ternary     |  ?:         |  Right
+Logical-OR  |  or         |  Left
+Logical-AND |  and        |  Left
+Equality    |  == !=      |  Left
+Comparison  |  > >= < <=  |  Left
+Term        |  - +        |  Left
+Factor      |  / *        |  Left
+Unary       |  ! - +      |  Right
+Call        |  ()         |  Left
+---------------------------------------
