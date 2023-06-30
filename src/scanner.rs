@@ -167,7 +167,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn is_at_end(&self) -> bool {
-        self.chars.clone().next() == None
+        self.chars.clone().next().is_none()
     }
 
     fn peek(&self) -> char {
@@ -194,7 +194,7 @@ impl<'a> Scanner<'a> {
         }
 
         self.advance();
-        return true;
+        true
     }
 
     fn make_token(&self, kind: TokenKind) -> Token {

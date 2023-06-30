@@ -183,10 +183,9 @@ impl<'a> Parser<'a> {
     fn string(&mut self) -> ParseResult {
         let lexeme = self.get_lexeme(&self.previous);
         let lexeme = &lexeme[1..lexeme.len() - 1];
-        let string = String::from(lexeme).into_boxed_str();
 
         // A string object is heap allocated, hence use the GC to create it.
-        let object = self.gc.create_object(ObjectKind::String(string));
+        let object = self.gc.create_object(ObjectKind::from(lexeme));
         self.emit_constant(Value::Object(object));
 
         Ok(())
@@ -333,7 +332,7 @@ impl<'a> Parser<'a> {
     // Helper methods
     //-----------------------------------------------------
     fn parse_number(&self, token: &Token) -> Result<f64, ()> {
-        match self.get_lexeme(&token).parse::<f64>() {
+        match self.get_lexeme(token).parse::<f64>() {
             Ok(num) => Ok(num),
             Err(_) => {
                 self.error_at_prev("Invalid floating point number");

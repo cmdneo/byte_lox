@@ -7,7 +7,7 @@ pub struct GarbageCollector {
 impl GarbageCollector {
     pub fn new() -> Self {
         GarbageCollector {
-            objects: Vec::new(),
+            objects: Vec::with_capacity(8),
         }
     }
 

@@ -40,6 +40,12 @@ pub enum InterpretError {
 
 type InterpretResult = Result<(), InterpretError>;
 
+impl Default for VM {
+    fn default() -> Self {
+        VM::new()
+    }
+}
+
 impl VM {
     /// Creates a new VM.
     /// Chunk must have a RETURN instruction at the end.

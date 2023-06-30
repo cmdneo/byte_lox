@@ -29,11 +29,7 @@ impl Value {
     #[inline]
     pub fn is_string(&self) -> bool {
         if let Value::Object(obj) = self {
-            if let ObjectKind::String(_) = &obj.kind {
-                true
-            } else {
-                false
-            }
+            matches!(obj.kind, ObjectKind::String(_))
         } else {
             false
         }
@@ -41,11 +37,7 @@ impl Value {
 
     #[inline]
     pub fn is_number(&self) -> bool {
-        if let Value::Number(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Value::Number(_))
     }
 }
 
@@ -55,7 +47,8 @@ pub fn add_strings(lhs: &Value, rhs: &Value, gc: &mut GarbageCollector) -> Value
             (ObjectKind::String(s), ObjectKind::String(t)) => {
                 let result = s.to_string().add(t).into_boxed_str();
                 let object = gc.create_object(ObjectKind::String(result));
-                return Value::Object(object);
+
+                Value::Object(object)
             }
             _ => unreachable!(),
         },
@@ -125,7 +118,7 @@ impl ops::Neg for Value {
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
-            (Self::Number(x), Self::Number(y)) => x.partial_cmp(&y),
+            (Self::Number(x), Self::Number(y)) => x.partial_cmp(y),
             // PartialOrd on Objects is only supported for string objects.
             // If the objects are not of type string then it will panic.
             (Self::Object(x), Self::Object(y)) => x.partial_cmp(y),

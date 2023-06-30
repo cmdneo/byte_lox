@@ -9,6 +9,7 @@ use std::{alloc, fmt};
 // thus objects can only be compared when they are contained in a GcObject.
 pub struct Object {
     pub marked: bool,
+    pub hash: u32,
     pub kind: ObjectKind,
 }
 
@@ -19,11 +20,41 @@ impl fmt::Display for Object {
 }
 
 pub enum ObjectKind {
-    // No need to use dynamic String type, as its size is fixed
+    // Use Box<str> as its size is fixed
     String(Box<str>),
     Instance,
     Class,
     Function,
+}
+
+fn hash_string(string: &str) -> u32 {
+    let bytes = string.as_bytes();
+    let mut hash = 2166136261u32; // FNV offset-basis
+
+    for &c in bytes {
+        hash ^= c as u32;
+        hash *= 16777619; // FNV prime
+    }
+
+    hash
+}
+
+impl ObjectKind {
+    /// Calculates hash function of an Object,
+    /// If a type is not hashable then just hash it's pointer value.
+    fn hash(&self, ptr: *const Object) -> u32 {
+        match self {
+            Self::String(s) => hash_string(s),
+            _ => ptr as u32,
+        }
+    }
+}
+
+impl From<&str> for ObjectKind {
+    fn from(lexeme: &str) -> Self {
+        let string = String::from(lexeme).into_boxed_str();
+        Self::String(string)
+    }
 }
 
 impl fmt::Display for ObjectKind {
@@ -50,6 +81,12 @@ pub struct GcObject {
 }
 
 impl GcObject {
+    /// Checks if two GcObjects are the same(they refer to the same object).
+    #[inline]
+    pub fn is_same_as(&self, other: &GcObject) -> bool {
+        self.object == other.object
+    }
+
     pub unsafe fn allocate(object: ObjectKind) -> Self {
         let layout = alloc::Layout::new::<Object>();
         let ptr = alloc::alloc(layout);
@@ -60,6 +97,7 @@ impl GcObject {
         let object_ptr = ptr as *mut Object;
         *object_ptr = Object {
             marked: false,
+            hash: object.hash(object_ptr),
             kind: object,
         };
 
@@ -86,7 +124,7 @@ impl PartialEq for GcObject {
         use ObjectKind::String;
         match (left, right) {
             (String(s), String(t)) => s == t,
-            _ => self.object == other.object,
+            _ => self.is_same_as(other),
         }
     }
 }
