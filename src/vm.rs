@@ -1,9 +1,13 @@
 use std::ops::{Add, Div, Mul, Sub};
 
-use crate::chunk::{Chunk, OpCode};
-use crate::garbage::GarbageCollector;
-use crate::value::{add_strings, Value};
-use crate::{compiler, debug};
+use crate::{
+    chunk::{Chunk, OpCode},
+    compiler, debug,
+    garbage::GarbageCollector,
+    strings::{add_strings, StringCreator},
+    table::Table,
+    value::Value,
+};
 
 const STACK_MAX: usize = 256;
 
@@ -30,6 +34,7 @@ pub struct VM {
     ip: usize,
     stack: [Value; STACK_MAX],
     stack_top: usize,
+    strings: Table,
     gc: GarbageCollector,
 }
 
@@ -55,13 +60,16 @@ impl VM {
             ip: 0,
             stack: [Value::Nil; STACK_MAX],
             stack_top: 0,
+            strings: Table::new(),
             gc: GarbageCollector::new(),
         }
     }
 
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
         let chunk: Chunk;
-        if let Ok(ch) = compiler::compile(source, &mut self.gc) {
+        let sc = StringCreator::new(&mut self.gc, &mut self.strings);
+
+        if let Ok(ch) = compiler::compile(source, sc) {
             chunk = ch;
         } else {
             return Err(InterpretError::Compile);
@@ -153,7 +161,8 @@ impl VM {
                     if self.peek(0).is_string() {
                         let rhs = self.pop();
                         let lhs = self.pop();
-                        let result = add_strings(&lhs, &rhs, &mut self.gc);
+                        let sc = StringCreator::new(&mut self.gc, &mut self.strings);
+                        let result = add_strings(&lhs, &rhs, sc);
                         self.push(result);
                     } else {
                         binary_arith_op!(self, add);

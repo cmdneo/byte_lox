@@ -1,6 +1,11 @@
-use std::cmp::Ordering;
-use std::ops::{Deref, DerefMut};
-use std::{alloc, fmt};
+use std::{
+    alloc,
+    cmp::Ordering,
+    fmt,
+    ops::{Deref, DerefMut},
+};
+
+use crate::strings::hash_string;
 
 /// Heap allocated Lox Objects, with mark and sweep garbage collection.
 /// The actual object is stored as a pointer, it's allocation and deallocation
@@ -8,7 +13,9 @@ use std::{alloc, fmt};
 // NOTE: Comparison operations for Object are implemented by GcObject,
 // thus objects can only be compared when they are contained in a GcObject.
 pub struct Object {
+    /// For the garbage collector
     pub marked: bool,
+    /// Cached hash value
     pub hash: u32,
     pub kind: ObjectKind,
 }
@@ -19,29 +26,18 @@ impl fmt::Display for Object {
     }
 }
 
+/// Representation for different kind of dynamically allocated Lox Objects
 pub enum ObjectKind {
-    // Use Box<str> as its size is fixed
+    // Not using string::String as size of a string is always fixed
     String(Box<str>),
     Instance,
     Class,
     Function,
 }
 
-fn hash_string(string: &str) -> u32 {
-    let bytes = string.as_bytes();
-    let mut hash = 2166136261u32; // FNV offset-basis
-
-    for &c in bytes {
-        hash ^= c as u32;
-        hash *= 16777619; // FNV prime
-    }
-
-    hash
-}
-
 impl ObjectKind {
     /// Calculates hash function of an Object,
-    /// If a type is not hashable then just hash it's pointer value.
+    /// If a type is not hashable then just hash it's pointer.
     fn hash(&self, ptr: *const Object) -> u32 {
         match self {
             Self::String(s) => hash_string(s),
@@ -50,10 +46,9 @@ impl ObjectKind {
     }
 }
 
-impl From<&str> for ObjectKind {
-    fn from(lexeme: &str) -> Self {
-        let string = String::from(lexeme).into_boxed_str();
-        Self::String(string)
+impl From<String> for ObjectKind {
+    fn from(lexeme: String) -> Self {
+        Self::String(lexeme.into_boxed_str())
     }
 }
 
@@ -81,7 +76,7 @@ pub struct GcObject {
 }
 
 impl GcObject {
-    /// Checks if two GcObjects are the same(they refer to the same object).
+    /// Checks if two GcObjects refer to the same object in memory.
     #[inline]
     pub fn is_same_as(&self, other: &GcObject) -> bool {
         self.object == other.object
@@ -113,19 +108,11 @@ impl GcObject {
 
 impl PartialEq for GcObject {
     fn eq(&self, other: &Self) -> bool {
-        let right = &self.kind;
-        let left = &other.kind;
-
         // Only strings objects are compared with each other for equality.
-        //
-        // Two distinct (non-string)objects are not considered equal, even if they
-        // are of the same type and have the same content. They are considered
-        // equal only if they refer to the same object in memory.
-        use ObjectKind::String;
-        match (left, right) {
-            (String(s), String(t)) => s == t,
-            _ => self.is_same_as(other),
-        }
+        // Two distinct (non-string)objects are considered equal,
+        // only if refer to the same object in memory.
+        // Since all strings are interned we just check if pointers are same.
+        self.is_same_as(other)
     }
 }
 

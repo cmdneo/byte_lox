@@ -1,0 +1,197 @@
+use crate::{
+    object::{GcObject, ObjectKind},
+    value::Value,
+};
+
+const TABLE_MAX_LOAD: f32 = 0.70;
+
+/// Hash table for storing key-value pairs.
+/// Key is should be a string and value can be any Lox type.
+///
+/// It uses Open addressing, so the hash table is a single continguous block
+/// of memory. Linear probing is used for resolving collisions.
+pub struct Table {
+    entries: Vec<Bucket>,
+    count: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Bucket {
+    Filled(Entry),
+    Empty,
+    Deleted,
+}
+
+#[derive(Clone, Copy)]
+struct Entry {
+    key: GcObject,
+    value: Value,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Table {
+    pub fn new() -> Self {
+        // Initially create with capacity 0, so that the vector does not allocate.
+        Self {
+            entries: vec![],
+            count: 0,
+        }
+    }
+
+    pub fn copy_from(&mut self, from: &Table) {
+        for entry in from.entries.iter() {
+            if let Bucket::Filled(entry) = entry {
+                self.insert(entry.key, entry.value);
+            }
+        }
+    }
+
+    /// Inserts a key-value pair.
+    /// If the key did not already exist then inserts it and returns true,
+    /// otherwise it overwrites the value of the key and returns false.
+    pub fn insert(&mut self, key: GcObject, value: Value) -> bool {
+        // Resize the table if load factor exceeds the max load factor
+        if (self.count + 1) as f32 > (self.capacity() as f32) * TABLE_MAX_LOAD {
+            let cap = next_capacity(self.capacity());
+            self.adjust_capacity(cap);
+        }
+
+        let index = self.entry_index(key);
+        let entry = &mut self.entries[index];
+
+        // Since deleted buckets are also counted as full buckets,
+        // only increment the count if an *ACTUAL* empty bucket is found.
+        if matches!(entry, Bucket::Empty) {
+            self.count += 1;
+        }
+
+        let is_new_key = matches!(entry, Bucket::Empty | Bucket::Deleted);
+        *entry = Bucket::Filled(Entry { key, value });
+
+        is_new_key
+    }
+
+    /// Deletes an entry with the given key.
+    /// Returns true if the entry was present and deleted otherwise false.
+    ///
+    /// NOTE: Deleting entries does not lower the load factor table due to
+    /// implementation constraints. So use the delete operation sparingly.
+    pub fn delete(&mut self, key: GcObject) -> bool {
+        // We do not consider Deleted entries(tombstones) empty buckets,
+        // therefore, we do not reduce the count after deleting an entry.
+        let index = self.entry_index(key);
+        if let Bucket::Filled(_) = self.entries[index] {
+            self.entries[index] = Bucket::Deleted;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn find(&mut self, key: GcObject) -> Option<Value> {
+        if self.capacity() == 0 {
+            return None;
+        }
+
+        let index = self.entry_index(key);
+        if let Bucket::Filled(entry) = self.entries[index] {
+            Some(entry.value)
+        } else {
+            None
+        }
+    }
+
+    pub fn find_string(&self, string: &str, hash: u32) -> Option<GcObject> {
+        if self.capacity() == 0 {
+            return None;
+        }
+
+        let mut index = hash as usize % self.capacity();
+
+        loop {
+            match &self.entries[index] {
+                Bucket::Filled(entry) => {
+                    if entry.key.hash != hash {
+                        continue;
+                    }
+
+                    if let ObjectKind::String(key) = &entry.key.kind {
+                        if string.as_bytes() == key.as_bytes() {
+                            return Some(entry.key);
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                }
+
+                Bucket::Empty => return None,
+                Bucket::Deleted => (),
+            }
+
+            index = (index + 1) % self.capacity();
+        }
+    }
+
+    /// Returns the index of the corresponding bucket for the entry
+    fn entry_index(&self, key: GcObject) -> usize {
+        debug_assert!(self.capacity() != 0);
+
+        let mut index = key.hash as usize % self.capacity();
+        let mut tombstone: Option<usize> = None;
+
+        loop {
+            match &self.entries[index] {
+                // We only use strings for keys as of now.
+                // All strings are interned so, only comparing the pointers works.
+                Bucket::Filled(entry) => {
+                    if entry.key.is_same_as(&key) {
+                        return index;
+                    }
+                }
+
+                Bucket::Empty => return tombstone.unwrap_or(index),
+
+                Bucket::Deleted => tombstone = Some(index),
+            }
+
+            index = (index + 1) % self.capacity();
+        }
+    }
+
+    /// Rebuilds the table with the given capacity(number of buckets).
+    /// capacity must not be less than the number of items in the table.
+    fn adjust_capacity(&mut self, capacity: usize) {
+        // Allocate a new table and swap it with the old table.
+        // We need the contents of the old table for building the new table
+        let mut entries: Vec<Bucket> = vec![Bucket::Empty; capacity];
+        std::mem::swap(&mut self.entries, &mut entries);
+        self.count = 0;
+
+        for entry in entries {
+            if let Bucket::Filled(entry) = entry {
+                // Find the bucket in the new table for the entry and fill it.
+                let index = self.entry_index(entry.key);
+                self.entries[index] = Bucket::Filled(entry);
+                self.count += 1;
+            }
+        }
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn next_capacity(capacity: usize) -> usize {
+    if capacity == 0 {
+        8
+    } else {
+        capacity * 2
+    }
+}

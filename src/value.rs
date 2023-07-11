@@ -1,8 +1,5 @@
-use std::cmp::Ordering;
-use std::ops::Add;
-use std::{fmt, ops};
+use std::{cmp::Ordering, fmt, ops};
 
-use crate::garbage::GarbageCollector;
 use crate::object::{GcObject, ObjectKind};
 
 /// The Lox dynamic value type.
@@ -38,21 +35,6 @@ impl Value {
     #[inline]
     pub fn is_number(&self) -> bool {
         matches!(self, Value::Number(_))
-    }
-}
-
-pub fn add_strings(lhs: &Value, rhs: &Value, gc: &mut GarbageCollector) -> Value {
-    match (lhs, rhs) {
-        (Value::Object(x), Value::Object(y)) => match (&x.kind, &y.kind) {
-            (ObjectKind::String(s), ObjectKind::String(t)) => {
-                let result = s.to_string().add(t).into_boxed_str();
-                let object = gc.create_object(ObjectKind::String(result));
-
-                Value::Object(object)
-            }
-            _ => unreachable!(),
-        },
-        _ => unreachable!(),
     }
 }
 

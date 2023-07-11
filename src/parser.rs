@@ -1,11 +1,12 @@
 use std::mem::transmute;
 
-use crate::chunk::{Chunk, OpCode};
-use crate::debug;
-use crate::garbage::GarbageCollector;
-use crate::object::ObjectKind;
-use crate::scanner::{Scanner, Token, TokenKind};
-use crate::value::Value;
+use crate::{
+    chunk::{Chunk, OpCode},
+    debug,
+    scanner::{Scanner, Token, TokenKind},
+    strings::StringCreator,
+    value::Value,
+};
 
 /// This module parses raw Lox source and generates the bytecode for it,
 /// to be executed by the VM module.
@@ -21,8 +22,8 @@ pub struct Parser<'a> {
     source: &'a str,
     /// Current chunk for codegen
     chunk: Chunk,
-    /// GC for allocating string literals as Lox Objects
-    gc: &'a mut GarbageCollector,
+    /// For allocating interned string literals
+    string_creator: StringCreator<'a>,
 }
 
 type ParseResult = Result<(), ()>;
@@ -52,14 +53,14 @@ fn next_precedence(precedence: Precedence) -> Precedence {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str, gc: &'a mut GarbageCollector) -> Self {
+    pub fn new(source: &'a str, string_creator: StringCreator<'a>) -> Self {
         Self {
             current: Token::default(),
             previous: Token::default(),
             scanner: Scanner::new(source),
             source,
             chunk: Chunk::new(),
-            gc,
+            string_creator,
         }
     }
 
@@ -182,10 +183,10 @@ impl<'a> Parser<'a> {
 
     fn string(&mut self) -> ParseResult {
         let lexeme = self.get_lexeme(&self.previous);
-        let lexeme = &lexeme[1..lexeme.len() - 1];
+        let string = String::from(&lexeme[1..lexeme.len() - 1]);
 
         // A string object is heap allocated, hence use the GC to create it.
-        let object = self.gc.create_object(ObjectKind::from(lexeme));
+        let object = self.string_creator.create(string);
         self.emit_constant(Value::Object(object));
 
         Ok(())

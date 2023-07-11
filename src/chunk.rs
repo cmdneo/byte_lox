@@ -1,5 +1,6 @@
-use crate::value::Value;
 use std::mem::transmute;
+
+use crate::value::Value;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum OpCode {
