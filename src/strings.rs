@@ -11,22 +11,22 @@ use crate::{
 /// It interns the string, and adds it to the GarbageCollector.
 pub struct StringCreator<'a> {
     gc: &'a mut GarbageCollector,
-    strings: &'a mut Table,
+    strings: &'a mut Table<()>,
 }
 
 impl<'a> StringCreator<'a> {
-    pub fn new(gc: &'a mut GarbageCollector, strings: &'a mut Table) -> Self {
+    pub fn new(gc: &'a mut GarbageCollector, strings: &'a mut Table<()>) -> Self {
         Self { gc, strings }
     }
 
     pub fn create(&mut self, string: String) -> GcObject {
-        let interned = self.strings.find_string(&string, hash_string(&string));
+        let interned = self.strings.find_string(&string);
 
         if let Some(string_obj) = interned {
             string_obj
         } else {
             let ret = self.gc.create_object(ObjectKind::from(string));
-            let is_new = self.strings.insert(ret, Value::Nil);
+            let is_new = self.strings.insert(ret, ());
             debug_assert!(is_new);
 
             ret
@@ -48,7 +48,6 @@ pub fn hash_string(string: &str) -> u32 {
 }
 
 pub fn add_strings(lhs: &Value, rhs: &Value, mut string_creator: StringCreator) -> Value {
-    // Yes! It looks quite not that clean.
     match (lhs, rhs) {
         (Value::Object(x), Value::Object(y)) => match (&x.kind, &y.kind) {
             (ObjectKind::String(s), ObjectKind::String(t)) => {
@@ -57,8 +56,10 @@ pub fn add_strings(lhs: &Value, rhs: &Value, mut string_creator: StringCreator) 
 
                 Value::Object(object)
             }
+
             _ => unreachable!(),
         },
+
         _ => unreachable!(),
     }
 }
