@@ -2,18 +2,40 @@ use std::mem::transmute;
 
 use crate::value::Value;
 
+/// OpCodes for the interpreter VM.
+///
+/// For opcodes which support index values:
+/// By default they use 1-byte index, but if they are preceded by a single
+/// LongIndex opcode then, they use 2-byte index.
+///
+/// All multibyte index values are stored in little-endian
 #[derive(Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum OpCode {
-    /// Load constant, uses 1 byte for index
+    /// Load constant
     Constant,
-    /// Load constant, uses 2 bytes for index
-    LongConstant,
     /// Load nil
     Nil,
     /// Load boolean true
     True,
     /// Load boolean false
     False,
+
+    /// Pops a value off the stack
+    Pop,
+    /// Indicates that the following opcode has a 2-byte index
+    LongIndex,
+
+    /// Defines a global
+    DefineGlobal,
+    /// Get a global
+    GetGlobal,
+    /// Set a global,
+    SetGlobal,
+    /// Get a local
+    GetLocal,
+    /// Set a local
+    SetLocal,
 
     // Equality operators, work on all types
     Equal,
@@ -36,19 +58,24 @@ pub enum OpCode {
     // Logical operators, work on all types.
     Not,
 
+    // Statement opcodes
+    Print,
+    Assert,
+
     /// Return from a procedure
     Return,
-    // Keeep this Return instruction at last!
+    // Keeep this Return opcode at last!
 }
 
 impl TryFrom<u8> for OpCode {
     type Error = ();
 
+    #[inline]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
+        // Return is the last opcode
         if value > Self::Return as u8 {
             Err(())
         } else {
-            // Return is the last opcode
             unsafe { Ok(transmute::<u8, OpCode>(value)) }
         }
     }
@@ -90,24 +117,9 @@ impl Chunk {
         self.code.push(byte);
     }
 
-    pub fn write_constant(&mut self, value: Value, line: u32) {
-        let index = self.add_constant(value);
-        let index_bytes = index.to_le_bytes();
-
-        if index < u8::MAX as usize {
-            self.write(OpCode::Constant as u8, line);
-            self.write(index_bytes[0], line);
-        } else if index < u16::MAX as usize {
-            self.write(OpCode::LongConstant as u8, line);
-            self.write(index_bytes[0], line);
-            self.write(index_bytes[1], line);
-        } else {
-            eprintln!(
-                "Too many constants in current scope (maximum is {})",
-                u16::MAX
-            );
-            std::process::exit(1);
-        }
+    pub fn add_constant(&mut self, value: Value) -> usize {
+        self.constants.push(value);
+        self.constants.len() - 1
     }
 
     pub fn get_line(&self, offset: usize) -> u32 {
@@ -125,10 +137,5 @@ impl Chunk {
         }
 
         unreachable!();
-    }
-
-    fn add_constant(&mut self, value: Value) -> usize {
-        self.constants.push(value);
-        self.constants.len() - 1
     }
 }

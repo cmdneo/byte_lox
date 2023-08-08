@@ -4,12 +4,40 @@ use crate::{
     chunk::{Chunk, OpCode},
     compiler, debug,
     garbage::GarbageCollector,
+    object::GcObject,
     strings::{add_strings, StringCreator},
     table::Table,
     value::Value,
 };
 
 const STACK_MAX: usize = 256;
+
+/// Macro for boilerolate of form
+/// ```no_run
+/// match u8_integer {
+///     x if x == SomeEnum::Variant1 as u8 => { action }
+///     x if x == SomeEnum::Variant2 as u8 => { action }
+///     // ... and more
+///     // The wildcard(catch all) arm is required
+///     _ => { action }
+/// }
+/// ```
+///
+/// Which allows us to write just `SomeEnum::Variantx` instead of <br>
+/// `x if x == SomeEnum::Variantx as u8` in the match arms
+///
+/// We are using this because,
+/// converting u8 to OpCode enum requires checking everytime which may cause slowdowns.
+macro_rules! enum_u8_match {
+    (match $u8_value:ident {
+        $($variant:expr => $match_action:block)*
+        _ => $wild_action:block
+    }) => { match $u8_value {
+        $(x if ($variant as u8) == x => $match_action)*
+        _ => $wild_action
+        }
+    };
+}
 
 // Instead of popping off the value and then pushing it back.
 // Just modify the value in place at stack top.
@@ -30,11 +58,19 @@ macro_rules! binary_cmp_op {
 }
 
 pub struct VM {
+    /// Currently executing chunk with bytecode and associated constants
     chunk: Chunk,
+    /// Instruction pointer: Points to the next instruction to be executed
     ip: usize,
+    /// Stack for storing temporararies and local variables
     stack: [Value; STACK_MAX],
+    /// Stack pointer
     stack_top: usize,
-    strings: Table,
+    /// Interned strings collection table
+    strings: Table<()>,
+    /// Global variables table
+    globals: Table<Value>,
+    /// VM's mark and sweep garbage collector
     gc: GarbageCollector,
 }
 
@@ -61,6 +97,7 @@ impl VM {
             stack: [Value::Nil; STACK_MAX],
             stack_top: 0,
             strings: Table::new(),
+            globals: Table::new(),
             gc: GarbageCollector::new(),
         }
     }
@@ -88,6 +125,7 @@ impl VM {
     fn run(&mut self) -> InterpretResult {
         loop {
             if cfg!(feature = "trace_execution") {
+                // Dump the stack
                 print!("          ");
                 for value in &self.stack[0..self.stack_top] {
                     print!("[ {value} ]");
@@ -97,21 +135,20 @@ impl VM {
                 debug::disassemble_instruction(&self.chunk, self.ip);
             }
 
-            let instruction = OpCode::try_from(self.next_byte());
-            let instruction = if let Ok(opcode) = instruction {
-                opcode
-            } else {
-                return Err(InterpretError::Runtime);
-            };
+            let byte = self.next_byte();
+            // Skip to the next opcode if the curren opcode is IsLong and indicate
+            // that the next opcode has has a 2-byte index via is_long.
+            let is_long = byte == OpCode::LongIndex as u8;
+            let byte = if is_long { self.next_byte() } else { byte };
 
-            match instruction {
+            let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
+                panic!("Invalid opcode '{byte}' at offset {}", self.ip - 1);
+            });
+
+            // enum_u8_match! {
+            match opcode {
                 OpCode::Constant => {
-                    let constant = self.read_constant();
-                    self.push(constant);
-                }
-
-                OpCode::LongConstant => {
-                    let constant = self.read_long_constant();
+                    let constant = self.read_constant(is_long);
                     self.push(constant);
                 }
 
@@ -125,6 +162,60 @@ impl VM {
 
                 OpCode::False => {
                     self.push(Value::Boolean(false));
+                }
+
+                OpCode::Pop => {
+                    self.pop();
+                }
+
+                OpCode::LongIndex => {
+                    // It is already checked for and skipped
+                    unreachable!()
+                }
+
+                OpCode::DefineGlobal => {
+                    let name = self.read_object(is_long);
+
+                    self.globals.insert(name, self.peek(0));
+                    // Pop it after insertion, so that GC does not remove it.
+                    self.pop();
+                }
+
+                OpCode::GetGlobal => {
+                    let name = self.read_object(is_long);
+
+                    if let Some(value) = self.globals.find(name) {
+                        self.push(value);
+                    } else {
+                        self.error(&format!("Undefined variable '{}'.", name));
+                        return Err(InterpretError::Runtime);
+                    }
+                }
+
+                OpCode::SetGlobal => {
+                    let name = self.read_object(is_long);
+
+                    // If the variable name did not exist, then assigning it is illegal.
+                    if self.globals.insert(name, self.peek(0)) {
+                        self.globals.delete(name);
+                        self.error(&format!("Undefined variable '{}'.", name));
+                        return Err(InterpretError::Runtime);
+                    }
+
+                    // No need to pop the value after assingment, since it is an
+                    // expression and its result is the same as its operand.
+                }
+
+                OpCode::GetLocal => {
+                    let slot = self.read_index(is_long);
+                    self.push(self.stack[slot]);
+                }
+
+                OpCode::SetLocal => {
+                    let slot = self.read_index(is_long);
+                    self.stack[slot] = self.peek(0);
+                    // No need to pop the value after assingment, since it is an
+                    // expression and its result is the same as its operand.
                 }
 
                 OpCode::Equal => {
@@ -195,17 +286,30 @@ impl VM {
                     self.stack[self.stack_top - 1] = Value::Boolean(result);
                 }
 
-                OpCode::Return => {
-                    self.pop();
-                    return Ok(());
+                OpCode::Print => {
+                    println!("{}", self.pop());
                 }
+
+                OpCode::Assert => {
+                    if !self.pop().truthiness() {
+                        self.error("Assertion failed.");
+                        return Err(InterpretError::Runtime);
+                    }
+                }
+
+                OpCode::Return => {
+                    return Ok(());
+                } // _ => {
+                  //     panic!("Invalid opcode");
+                  // }
             }
+            // }
         }
     }
 
     // Error reporting and recovery methods
     //-----------------------------------------------------
-    fn error_at_current(&self, message: &str) {
+    fn error(&self, message: &str) {
         // Interpreter has already consumed the instruction, so back by 1.
         let line = self.chunk.get_line(self.ip - 1);
         eprintln!("{message}");
@@ -219,7 +323,7 @@ impl VM {
         if self.peek(0).is_number() {
             Ok(())
         } else {
-            self.error_at_current("Operand must be a number.");
+            self.error("Operand must be a number.");
             Err(InterpretError::Runtime)
         }
     }
@@ -231,7 +335,7 @@ impl VM {
         if x.is_number() && y.is_number() {
             Ok(())
         } else {
-            self.error_at_current("Both operands must be numbers.");
+            self.error("Both operands must be numbers.");
             Err(InterpretError::Runtime)
         }
     }
@@ -243,7 +347,7 @@ impl VM {
         if (x.is_string() && y.is_string()) || (y.is_number() && y.is_number()) {
             Ok(())
         } else {
-            self.error_at_current("Operands must be either both numbers or both strings.");
+            self.error("Operands must be either both numbers or both strings.");
             Err(InterpretError::Runtime)
         }
     }
@@ -255,18 +359,27 @@ impl VM {
         ret
     }
 
-    #[inline]
-    fn read_constant(&mut self) -> Value {
-        let index = self.next_byte() as usize;
+    fn read_object(&mut self, is_long: bool) -> GcObject {
+        if let Value::Object(name) = self.read_constant(is_long) {
+            name
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn read_constant(&mut self, is_long: bool) -> Value {
+        let index = self.read_index(is_long);
         self.chunk.constants[index]
     }
 
     #[inline]
-    fn read_long_constant(&mut self) -> Value {
-        let bytes = [self.next_byte(), self.next_byte()];
-        let index = u16::from_le_bytes(bytes) as usize;
-
-        self.chunk.constants[index]
+    fn read_index(&mut self, is_long: bool) -> usize {
+        if is_long {
+            let bytes = [self.next_byte(), self.next_byte()];
+            u16::from_le_bytes(bytes) as usize
+        } else {
+            self.next_byte() as usize
+        }
     }
 
     #[inline]
@@ -282,7 +395,7 @@ impl VM {
     }
 
     #[inline]
-    fn peek(&self, distance: usize) -> &Value {
-        &self.stack[self.stack_top - distance - 1]
+    fn peek(&self, distance: usize) -> Value {
+        self.stack[self.stack_top - distance - 1]
     }
 }
