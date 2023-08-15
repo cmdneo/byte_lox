@@ -25,13 +25,12 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         False => simple("FALSE", offset),
 
         Pop => simple("POP", offset),
-        LongOperand => simple("LONG_OPERAND", offset),
 
         DefineGlobal => constant("DEFINE_GLOBAL", chunk, offset),
         GetGlobal => constant("GET_GLOBAL", chunk, offset),
         SetGlobal => constant("SET_GLOBAL", chunk, offset),
-        GetLocal => operand("SET_GLOBAL", chunk, offset),
-        SetLocal => operand("SET_GLOBAL", chunk, offset),
+        GetLocal => operand("GET_LOCAL", chunk, offset),
+        SetLocal => operand("SET_LOCAL", chunk, offset),
 
         Equal => simple("EQUAL", offset),
         NotEqual => simple("NOT_EQUAL", offset),
@@ -110,7 +109,7 @@ fn jump_instruction(name: &str, chunk: &Chunk, offset: usize, sign: i8) -> usize
 
 /// Returns the value of operand byte(s) and the new offset as a tuple
 fn read_operand(chunk: &Chunk, offset: usize) -> (usize, usize) {
-    let is_long = offset > 0 && chunk.code[offset - 1] == OpCode::LongOperand as u8;
+    let is_long = chunk.code[offset] >> 7 == 1;
 
     if is_long {
         // Long constant has 2-bytes operand

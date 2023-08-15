@@ -136,11 +136,7 @@ impl VM {
             }
 
             let byte = self.next_byte();
-            // Skip to the next opcode if the curren opcode is IsLong and indicate
-            // that the next opcode has has a 2-byte operand via is_long.
-            let is_long = byte == OpCode::LongOperand as u8;
-            let byte = if is_long { self.next_byte() } else { byte };
-
+            let is_long = byte >> 7 == 1;
             let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
                 panic!("Unknown opcode '{byte}' at offset {}", self.ip - 1);
             });
@@ -165,11 +161,6 @@ impl VM {
 
                 OpCode::Pop => {
                     self.pop();
-                }
-
-                OpCode::LongOperand => {
-                    // It is already checked for and skipped
-                    unreachable!()
                 }
 
                 OpCode::DefineGlobal => {

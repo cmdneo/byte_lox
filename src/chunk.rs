@@ -3,14 +3,16 @@ use std::mem::transmute;
 use crate::value::Value;
 
 /// OpCodes for the interpreter VM.
+/// Only the 7-LSB bits are used for representing the opcode.
+/// The MSB is used to indicate operand size.
 ///
 /// For opcodes which support operands:
-/// By default they use 1-byte operand, but if they are preceded by a single
-/// LongIndex opcode then, they use 2-byte operand.
+/// If their MSB is 0, then they use a 1-byte operand.
+/// But if the MSB is 1 then they use a 2-byte operand.
 /// Exception: Jump opcodes always use a 2-byte operand
 ///
 /// All multibyte operands are stored in little-endian format.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum OpCode {
     /// Load constant
@@ -24,8 +26,6 @@ pub enum OpCode {
 
     /// Pops a value off the stack
     Pop,
-    /// Indicates that the following opcode has a 2-byte operand
-    LongOperand,
 
     /// Defines a global
     DefineGlobal,
@@ -42,7 +42,7 @@ pub enum OpCode {
     Equal,
     NotEqual,
 
-// Comparion operators, work number and string
+    // Comparion operators, work number and string
     Greater,
     GreaterEqual,
     Less,
@@ -83,6 +83,8 @@ impl TryFrom<u8> for OpCode {
 
     #[inline]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
+        // Mask out the MSB which is used to represent operand size
+        let value = value & !(1 << 7);
         // Return is the last opcode
         if value > Self::Return as u8 {
             Err(())
