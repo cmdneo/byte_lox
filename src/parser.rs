@@ -1,4 +1,4 @@
-use std::mem::transmute;
+use std::{cell::RefCell, mem::transmute};
 
 use crate::{
     chunk::{Chunk, OpCode},
@@ -30,8 +30,13 @@ pub struct Parser<'a> {
     global_constant_table: Table<u32>,
     /// For allocating interned string literals
     string_creator: StringCreator<'a>,
+    /// Internal error state tracker
+    // Use interior mutability to avoid uncesesary mutability
+    had_error: RefCell<bool>,
 }
 
+/// Parse result indicator, `Parser::error` or `Parser::error_at` method must be
+/// called before returning the error variant to set the error flags appropriately.
 type ParseResult = Result<(), ()>;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -70,30 +75,30 @@ impl<'a> Parser<'a> {
             locals: Locals::new(),
             global_constant_table: Table::new(),
             string_creator,
+            had_error: RefCell::new(false),
         }
     }
 
     pub fn parse(mut self) -> Result<Chunk, ()> {
         self.advance(); // Prime the parser
 
-        let mut had_error = false;
-
         while !self.match_it(TokenKind::Eof) {
+            // Sync on errors leave the parser in an unpredictable state.
+            // `self.had_error` is already set by the functions if an error occured.
             if self.declaration().is_err() {
-                had_error = true;
                 self.synchronize();
             }
         }
 
         self.finalize_chunk();
 
-        if cfg!(feature = "trace_codegen") && !had_error {
-            debug::disassemble_chunk(&self.chunk, "Code");
-        }
-
-        if had_error {
+        if self.had_error.take() {
             Err(())
         } else {
+            if cfg!(feature = "trace_codegen") {
+                debug::disassemble_chunk(&self.chunk, "Code");
+            }
+
             Ok(self.chunk)
         }
     }
@@ -862,6 +867,8 @@ impl<'a> Parser<'a> {
     }
 
     fn error_at(&self, token: &Token, message: &str) {
+        self.had_error.replace(true);
+
         let lexeme = self.get_lexeme(token);
         let line = token.line;
 
