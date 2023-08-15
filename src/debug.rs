@@ -25,13 +25,13 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         False => simple("FALSE", offset),
 
         Pop => simple("POP", offset),
-        LongIndex => simple("LONG_INDEX", offset),
+        LongOperand => simple("LONG_OPERAND", offset),
 
         DefineGlobal => constant("DEFINE_GLOBAL", chunk, offset),
         GetGlobal => constant("GET_GLOBAL", chunk, offset),
         SetGlobal => constant("SET_GLOBAL", chunk, offset),
-        GetLocal => indexed("SET_GLOBAL", chunk, offset),
-        SetLocal => indexed("SET_GLOBAL", chunk, offset),
+        GetLocal => operand("SET_GLOBAL", chunk, offset),
+        SetLocal => operand("SET_GLOBAL", chunk, offset),
 
         Equal => simple("EQUAL", offset),
         NotEqual => simple("NOT_EQUAL", offset),
@@ -49,6 +49,8 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
 
         Print => simple("PRINT", offset),
         Assert => simple("ASSERT", offset),
+
+        JumpIfFalse => jump("JUMP_IF_FALSE", chunk, offset),
 
         Return => simple("RETURN", offset),
     }
@@ -73,36 +75,44 @@ fn simple(name: &str, offset: usize) -> usize {
 }
 
 /// Print the opcode along with its associated constant stored in the chunk's
-/// constant table which is indicated by opcode's index bytes
+/// constant table which is indicated by opcode's operand bytes
 fn constant(name: &str, chunk: &Chunk, offset: usize) -> usize {
-    let (index, offset) = read_index(chunk, offset);
-    println!("{name:-16} {index:4} '{}'", chunk.constants[index]);
+    let (operand, offset) = read_operand(chunk, offset);
+    println!("{name:-16} {operand:4} '{}'", chunk.constants[operand]);
 
     offset
 }
 
-/// Print the opcode along with its index bytes
-fn indexed(name: &str, chunk: &Chunk, offset: usize) -> usize {
-    let (index, offset) = read_index(chunk, offset);
-    println!("{name:-16} {index:4}");
+/// Print the opcode along with its operand bytes
+fn operand(name: &str, chunk: &Chunk, offset: usize) -> usize {
+    let (operand, offset) = read_operand(chunk, offset);
+    println!("{name:-16} {operand:4}");
 
     offset
 }
 
-/// Returns the value of index byte(s) and the new offset as a tuple
-fn read_index(chunk: &Chunk, offset: usize) -> (usize, usize) {
-    let is_long = offset > 0 && chunk.code[offset - 1] == OpCode::LongIndex as u8;
+fn jump(name: &str, chunk: &Chunk, offset: usize) -> usize {
+    let bytes = &chunk.code[offset + 1..offset + 3];
+    let jmp_offset = i16::from_le_bytes([bytes[0], bytes[1]]);
+    println!("{name:-16} {jmp_offset:4}");
+
+    offset + 3
+}
+
+/// Returns the value of operand byte(s) and the new offset as a tuple
+fn read_operand(chunk: &Chunk, offset: usize) -> (usize, usize) {
+    let is_long = offset > 0 && chunk.code[offset - 1] == OpCode::LongOperand as u8;
 
     if is_long {
-        // Long constant has 2-bytes index
+        // Long constant has 2-bytes operand
         let bytes = &chunk.code[offset + 1..offset + 3];
         let bytes = [bytes[0], bytes[1], 0, 0];
 
-        let index = u32::from_le_bytes(bytes);
-        (index as usize, offset + 3)
+        let operand = u32::from_le_bytes(bytes);
+        (operand as usize, offset + 3)
     } else {
-        // Normal constants have 1-byte index
-        let index = chunk.code[offset + 1];
-        (index as usize, offset + 2)
+        // Normal constants have 1-byte operand
+        let operand = chunk.code[offset + 1];
+        (operand as usize, offset + 2)
     }
 }

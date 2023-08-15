@@ -27,14 +27,12 @@ pub struct Parser<'a> {
     /// Current local variables info
     locals: Locals,
     /// Global to constant-index table to avoid duplicating identifiers
-    global_index_table: Table<u32>,
+    global_constant_table: Table<u32>,
     /// For allocating interned string literals
     string_creator: StringCreator<'a>,
 }
 
 type ParseResult = Result<(), ()>;
-
-// const LOCAL_UNINITIALIZED: i32 = -1;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -70,7 +68,7 @@ impl<'a> Parser<'a> {
             source,
             chunk: Chunk::new(),
             locals: Locals::new(),
-            global_index_table: Table::new(),
+            global_constant_table: Table::new(),
             string_creator,
         }
     }
@@ -81,8 +79,7 @@ impl<'a> Parser<'a> {
         let mut had_error = false;
 
         while !self.match_it(TokenKind::Eof) {
-            if let Ok(()) = self.declaration() {
-            } else {
+            if self.declaration().is_err() {
                 had_error = true;
                 self.synchronize();
             }
@@ -137,8 +134,9 @@ impl<'a> Parser<'a> {
             self.print_statement()
         } else if self.match_it(TokenKind::Assert) {
             self.assert_statement()
+        } else if self.match_it(TokenKind::If) {
+            self.if_statement()
         } else if self.match_it(TokenKind::LeftBrace) {
-            // Updates scope depth before entering and after leaving the block
             self.begin_scope();
             let ret = self.block();
             self.end_scope();
@@ -164,6 +162,14 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn if_statement(&mut self) -> ParseResult {
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'if'.")?;
+        self.expression()?;
+        self.consume(TokenKind::RightParen, "Expect ')' after condition.")?;
+
+        todo!()
+    }
+
     fn block(&mut self) -> ParseResult {
         while !self.check(TokenKind::LeftBrace) && !self.check(TokenKind::Eof) {
             self.declaration()?;
@@ -182,14 +188,15 @@ impl<'a> Parser<'a> {
 
     // Expression parsing methods
     //-----------------------------------------------------
+    /// Operator precendence parsing(Pratt Parser).
     fn parse_precedence(&mut self, min_prec: Precedence) -> ParseResult {
         self.advance();
 
         // Assingment can only be done once all higher precedence operators
-        // before the '=' operator have been parsed.
+        // before(left of) the '=' operator have been parsed.
         let can_assign = min_prec <= Precedence::Assignment;
 
-        // A prefix rule, that is an operand always needs to be parsed.
+        // Prefix rule, an operand is also a prefix so it should always be present.
         if self
             .exec_prefix_rule(self.previous.kind, can_assign)
             .is_err()
@@ -198,6 +205,8 @@ impl<'a> Parser<'a> {
             return Err(());
         }
 
+        // The '=' operator was after an expression which produces a non-lvalue
+        // Lvalues are variables and class instance fields
         if can_assign && self.match_it(TokenKind::Equal) {
             self.error("Invalid assingment target.");
             return Err(());
@@ -205,6 +214,7 @@ impl<'a> Parser<'a> {
 
         // Handles operator precedence along with associativity.
         // Associativity is a kind of directional[left or right] precedence.
+        // Rule like: (binop expr)*
         while min_prec <= infix_precedence(self.current.kind) {
             self.advance(); // Consume the operator token
             self.exec_infix_rule(self.previous.kind)?;
@@ -224,10 +234,9 @@ impl<'a> Parser<'a> {
 
     fn unary(&mut self) -> ParseResult {
         let operator_kind = self.previous.kind;
-
+        // Parse the expression after the operator
         self.parse_precedence(Precedence::Unary)?;
 
-        // Emit operator instruction
         match operator_kind {
             TokenKind::Plus => (),
             TokenKind::Minus => self.emit_opcode(OpCode::Negate),
@@ -243,8 +252,9 @@ impl<'a> Parser<'a> {
 
         // Binary operators (below) associate left-to-right so, they bind tighter
         // to their left operand than the right one, that's why we pass a
-        // higher precedence for the right operand.
+        // higher precedence for the right operand. Like: a+b+c = (a+b)+c
         let next_prec = next_precedence(infix_precedence(operator_kind));
+        // Parse the expression after the operator
         self.parse_precedence(next_prec)?;
 
         let opcode = match operator_kind {
@@ -341,9 +351,9 @@ impl<'a> Parser<'a> {
 
         if can_assign && self.match_it(TokenKind::Equal) {
             self.expression()?;
-            self.emit_indexed(set_op, index);
+            self.emit_with_operand(set_op, index);
         } else {
-            self.emit_indexed(get_op, index);
+            self.emit_with_operand(get_op, index);
         }
 
         Ok(())
@@ -407,7 +417,7 @@ impl<'a> Parser<'a> {
         // Global variables are stored seperately in a table. This opcode
         // pops the value produced by the initializer and puts it into the table
         // along with the global variable's name(indicated by index).
-        self.emit_indexed(OpCode::DefineGlobal, index);
+        self.emit_with_operand(OpCode::DefineGlobal, index);
     }
 
     /// Adds the identifier to chunk's constant table as a string object
@@ -415,13 +425,13 @@ impl<'a> Parser<'a> {
         let ident = self.get_lexeme(name).to_string();
         let ident = self.string_creator.create(ident);
 
-        // If the identifier is not found in the global index table then,
-        // add it to the global index table, otherwise use the found index.
+        // If the identifier is not found in the global constant table then,
+        // add it to the global constant table, otherwise use the found constant.
         // Doing so avoids adding an identifier to the chunks's constants table every
         // time it is encountered instead we just reuse the old entry.
-        self.global_index_table.find(ident).unwrap_or_else(|| {
+        self.global_constant_table.find(ident).unwrap_or_else(|| {
             let index = self.chunk.add_constant(Value::Object(ident)) as u32;
-            self.global_index_table.insert(ident, index);
+            self.global_constant_table.insert(ident, index);
             index
         })
     }
@@ -476,36 +486,51 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn emit_opcode(&mut self, opcode: OpCode) {
-        self.chunk.write(opcode as u8, self.previous.line);
+        self.emit_byte(opcode as u8);
+    }
+
+    #[inline]
+    fn emit_byte(&mut self, byte: u8) {
+        self.chunk.write(byte, self.previous.line);
+    }
+
+    /// Emits a jump opcode, fills the jump offset with junk and
+    /// returns the position of the associated 2-byte jump offset. <br>
+    /// Use `patch_jump` to set jump offset to the current position in bytecode.
+    fn emit_jump(&mut self, opcode: OpCode) -> usize {
+        self.emit_opcode(opcode);
+        self.emit_byte(0xFF);
+        self.emit_byte(0xFF);
+        self.chunk.code.len() - 2
     }
 
     fn emit_constant(&mut self, value: Value) {
         let index = self.chunk.add_constant(value) as u32;
-        self.emit_indexed(OpCode::Constant, index);
+        self.emit_with_operand(OpCode::Constant, index);
     }
 
-    /// Emits an opcode with an index value after it.
-    /// Additionaly prefixes the opcode with LongIndex if index cannot
-    /// fit into 1-byte, which indicates a 2-byte index.
-    /// If the index cannot fit even in 2-bytes then it panics.
-    fn emit_indexed(&mut self, opcode: OpCode, index: u32) -> u32 {
-        let index_bytes = index.to_le_bytes();
+    /// Emits an opcode with an operand value after it.
+    /// Additionaly prefixes the opcode with LongOperand if operand cannot
+    /// fit into 1-byte, which indicates a 2-byte operand.
+    /// If the operand cannot fit even in 2-bytes then it is an error and panics.
+    fn emit_with_operand(&mut self, opcode: OpCode, operand: u32) -> u32 {
+        let op_bytes = operand.to_le_bytes();
         let line = self.previous.line;
 
-        if index < u8::MAX as u32 {
+        if operand < u8::MAX as u32 {
             self.chunk.write(opcode as u8, line);
-            self.chunk.write(index_bytes[0], line);
-        } else if index < u16::MAX as u32 {
-            self.chunk.write(OpCode::LongIndex as u8, line);
+            self.chunk.write(op_bytes[0], line);
+        } else if operand < u16::MAX as u32 {
+            self.chunk.write(OpCode::LongOperand as u8, line);
             self.chunk.write(opcode as u8, line);
-            self.chunk.write(index_bytes[0], line);
-            self.chunk.write(index_bytes[1], line);
+            self.chunk.write(op_bytes[0], line);
+            self.chunk.write(op_bytes[1], line);
         } else {
             eprintln!("Index byte too large for OpCode (maximum is {})", u16::MAX);
             std::process::exit(1);
         }
 
-        index
+        operand
     }
 
     // Token matching/processing methods
@@ -604,8 +629,8 @@ impl<'a> Parser<'a> {
             // prefix(variable) expression parser before this function.
 
             // This is unreachable because every other non-infix token has
-            // logically the lowest precedence. And this function will never be
-            // entered if precedence is lower than Assingment level.
+            // the lowest precedence(NONE). And this function will never be
+            // entered if precedence is lower than Assingment.
             _ => unreachable!(),
         }
     }

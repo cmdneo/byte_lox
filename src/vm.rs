@@ -137,15 +137,14 @@ impl VM {
 
             let byte = self.next_byte();
             // Skip to the next opcode if the curren opcode is IsLong and indicate
-            // that the next opcode has has a 2-byte index via is_long.
-            let is_long = byte == OpCode::LongIndex as u8;
+            // that the next opcode has has a 2-byte operand via is_long.
+            let is_long = byte == OpCode::LongOperand as u8;
             let byte = if is_long { self.next_byte() } else { byte };
 
             let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
-                panic!("Invalid opcode '{byte}' at offset {}", self.ip - 1);
+                panic!("Unknown opcode '{byte}' at offset {}", self.ip - 1);
             });
 
-            // enum_u8_match! {
             match opcode {
                 OpCode::Constant => {
                     let constant = self.read_constant(is_long);
@@ -168,7 +167,7 @@ impl VM {
                     self.pop();
                 }
 
-                OpCode::LongIndex => {
+                OpCode::LongOperand => {
                     // It is already checked for and skipped
                     unreachable!()
                 }
@@ -207,12 +206,12 @@ impl VM {
                 }
 
                 OpCode::GetLocal => {
-                    let slot = self.read_index(is_long);
+                    let slot = self.read_operand(is_long);
                     self.push(self.stack[slot]);
                 }
 
                 OpCode::SetLocal => {
-                    let slot = self.read_index(is_long);
+                    let slot = self.read_operand(is_long);
                     self.stack[slot] = self.peek(0);
                     // No need to pop the value after assingment, since it is an
                     // expression and its result is the same as its operand.
@@ -297,13 +296,12 @@ impl VM {
                     }
                 }
 
+                OpCode::JumpIfFalse => {}
+
                 OpCode::Return => {
                     return Ok(());
-                } // _ => {
-                  //     panic!("Invalid opcode");
-                  // }
+                }
             }
-            // }
         }
     }
 
@@ -368,12 +366,12 @@ impl VM {
     }
 
     fn read_constant(&mut self, is_long: bool) -> Value {
-        let index = self.read_index(is_long);
+        let index = self.read_operand(is_long);
         self.chunk.constants[index]
     }
 
     #[inline]
-    fn read_index(&mut self, is_long: bool) -> usize {
+    fn read_operand(&mut self, is_long: bool) -> usize {
         if is_long {
             let bytes = [self.next_byte(), self.next_byte()];
             u16::from_le_bytes(bytes) as usize

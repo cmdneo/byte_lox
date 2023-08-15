@@ -4,11 +4,12 @@ use crate::value::Value;
 
 /// OpCodes for the interpreter VM.
 ///
-/// For opcodes which support index values:
-/// By default they use 1-byte index, but if they are preceded by a single
-/// LongIndex opcode then, they use 2-byte index.
+/// For opcodes which support operands:
+/// By default they use 1-byte operand, but if they are preceded by a single
+/// LongIndex opcode then, they use 2-byte operand.
+/// Exception: Jump opcodes always use a 2-byte operand
 ///
-/// All multibyte index values are stored in little-endian
+/// All multibyte operands are stored in little-endian format.
 #[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum OpCode {
@@ -23,8 +24,8 @@ pub enum OpCode {
 
     /// Pops a value off the stack
     Pop,
-    /// Indicates that the following opcode has a 2-byte index
-    LongIndex,
+    /// Indicates that the following opcode has a 2-byte operand
+    LongOperand,
 
     /// Defines a global
     DefineGlobal,
@@ -62,6 +63,10 @@ pub enum OpCode {
     Print,
     Assert,
 
+    /// Conditonal jump based on value on top of the stack.
+    /// Always uses a 2-byte operand for jump offset.
+    JumpIfFalse,
+
     /// Return from a procedure
     Return,
     // Keeep this Return opcode at last!
@@ -85,7 +90,7 @@ pub struct Chunk {
     pub code: Vec<u8>,
     pub constants: Vec<Value>,
     /// Store line info as Run-Length encoding: (value, length)
-    pub lines: Vec<(u32, u32)>,
+    lines: Vec<(u32, u32)>,
 }
 
 impl Default for Chunk {
