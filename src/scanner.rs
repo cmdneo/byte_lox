@@ -37,6 +37,8 @@ pub enum TokenKind {
     Return,
     Print,
     Assert,
+    Continue,
+    Break,
     // Declarations
     Fun,
     Var,

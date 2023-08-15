@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem::transmute};
+use std::{cell::RefCell, mem::transmute, ops::Deref};
 
 use crate::{
     chunk::{Chunk, OpCode},
@@ -9,6 +9,28 @@ use crate::{
     table::Table,
     value::Value,
 };
+
+/// Keeps info about the current loop for supporting
+/// `continue` and `break` statements
+struct Loop {
+    /// Depth of the scope the loop resides in
+    scope_depth: i32,
+    /// Loop begin position
+    begin: usize,
+    /// Since when will the loop will end is not available in advance.
+    /// We store the position of exit jump offsets that needs to be patched.
+    exit_jumps: Vec<usize>,
+}
+
+impl Loop {
+    pub fn new(scope_depth: i32, loop_begin: usize) -> Self {
+        Loop {
+            scope_depth,
+            begin: loop_begin,
+            exit_jumps: Vec::new(),
+        }
+    }
+}
 
 /// This module parses raw Lox source and generates the bytecode for it,
 /// to be executed by the VM module.
@@ -26,6 +48,8 @@ pub struct Parser<'a> {
     chunk: Chunk,
     /// Current local variables info
     locals: Locals,
+    /// Loop info for creating jump opcodes for `break` and `continue`
+    loops: Vec<Loop>,
     /// Global to constant-index table to avoid duplicating identifiers
     global_constant_table: Table<u32>,
     /// For allocating interned string literals
@@ -73,6 +97,7 @@ impl<'a> Parser<'a> {
             source,
             chunk: Chunk::new(),
             locals: Locals::new(),
+            loops: Vec::new(),
             global_constant_table: Table::new(),
             string_creator,
             had_error: RefCell::new(false),
@@ -139,6 +164,10 @@ impl<'a> Parser<'a> {
             self.print_statement()
         } else if self.match_it(TokenKind::Assert) {
             self.assert_statement()
+        } else if self.match_it(TokenKind::Continue) {
+            self.continue_statement()
+        } else if self.match_it(TokenKind::Break) {
+            self.break_statement()
         } else if self.match_it(TokenKind::If) {
             self.if_statement()
         } else if self.match_it(TokenKind::While) {
@@ -169,6 +198,37 @@ impl<'a> Parser<'a> {
         self.emit_opcode(OpCode::Assert);
 
         Ok(())
+    }
+
+    fn continue_statement(&mut self) -> ParseResult {
+        // Pop the locals on stack present before 'continue' inside the loop.
+        if let Some(depth) = self.innest_loop_depth() {
+            self.emit_pop_for_locals(depth);
+        }
+
+        if let Some(lox_loop) = self.loops.last() {
+            self.emit_loop(lox_loop.begin);
+        } else {
+            self.error("Continue statement outside loop.");
+        }
+
+        self.consume(TokenKind::Semicolon, "Expect ';' after 'continue'.")
+    }
+
+    fn break_statement(&mut self) -> ParseResult {
+        // Pop the locals on stack present before 'break' inside the loop
+        if let Some(depth) = self.innest_loop_depth() {
+            self.emit_pop_for_locals(depth);
+        }
+        let exit_jump = self.emit_jump(OpCode::Jump);
+
+        if let Some(lox_loop) = self.loops.last_mut() {
+            lox_loop.exit_jumps.push(exit_jump);
+        } else {
+            self.error("Break statement outside loop.");
+        }
+
+        self.consume(TokenKind::Semicolon, "Expect ';' after 'break'.")
     }
 
     // NOTE: In control flow statements the condition value needs to be explicitly
@@ -212,7 +272,7 @@ impl<'a> Parser<'a> {
     fn while_statement(&mut self) -> ParseResult {
         // For popping the condition value we emit POP opcodes once in the
         // while's body and once after its body.
-        let loop_begin = self.chunk.code.len();
+        let loop_begin = self.begin_loop();
 
         self.consume(TokenKind::LeftParen, "Expect '(' after 'while'.")?;
         self.expression()?;
@@ -226,15 +286,15 @@ impl<'a> Parser<'a> {
         self.patch_jump(exit_jump);
         self.emit_opcode(OpCode::Pop); // Pop condition
 
+        // This patches jumps for break statements inside the loop
+        self.end_loop_and_patch();
+
         Ok(())
     }
 
     fn for_statement(&mut self) -> ParseResult {
         self.begin_scope();
         self.consume(TokenKind::LeftParen, "Expect '(' after 'for'.")?;
-
-        // All three clauses(initialize, condition and increment) are optional.
-        const CONDITION_ABSENT: usize = usize::MAX;
 
         // The initializer clause
         if self.match_it(TokenKind::Semicolon) {
@@ -245,21 +305,20 @@ impl<'a> Parser<'a> {
             self.expression_statement()?;
         }
 
-        let mut loop_begin = self.chunk.code.len();
-        let exit_jump: usize;
+        let mut loop_begin = self.begin_loop();
 
         // The condition clause
         if self.match_it(TokenKind::Semicolon) {
-            // No condition clause means loop forever, so no jumps are needed here.
-            exit_jump = CONDITION_ABSENT;
+            // No condition clause means loop forever.
+            self.emit_opcode(OpCode::True);
         } else {
             self.expression()?;
             self.consume(TokenKind::Semicolon, "Expect ';' after loop condition.")?;
-
-            // Jump out of the loop if the conditon is false
-            exit_jump = self.emit_jump(OpCode::JumpIfFalse);
-            self.emit_opcode(OpCode::Pop); // Pop condition
         }
+
+        // Jump out of the loop if conditon is false
+        let exit_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_opcode(OpCode::Pop); // Pop condition
 
         // The increment clause
         // Now, since the increment clause runs after the body but it comes
@@ -274,22 +333,22 @@ impl<'a> Parser<'a> {
             self.expression()?;
             self.emit_opcode(OpCode::Pop);
             self.consume(TokenKind::RightParen, "Expect ')' after for clauses.")?;
-
             self.emit_loop(loop_begin);
-            // Sets the loop opcode after body to jump to the increment clause.
+
+            // Jump to the increment clause after body. We need to update both.
             loop_begin = increment_begin;
+            self.loops.last_mut().unwrap().begin = loop_begin;
             self.patch_jump(body_jump);
         }
 
         self.statement()?; // Loop body
-
         self.emit_loop(loop_begin);
 
-        if exit_jump != CONDITION_ABSENT {
-            self.patch_jump(exit_jump);
-            // Pop condition after the loop ends if the condition is present.
-            self.emit_opcode(OpCode::Pop);
-        }
+        self.patch_jump(exit_jump);
+        self.emit_opcode(OpCode::Pop); // Pop condition
+
+        // This patches jumps for break statements inside the loop.
+        self.end_loop_and_patch();
 
         self.end_scope();
 
@@ -564,8 +623,7 @@ impl<'a> Parser<'a> {
         }
 
         // We indicate that a local variable is uninitialized by setting
-        // its depth to -1. Reading an unititialized variable is an error
-        // and for local variables it is handeled at compile time.
+        // its depth to -1. Reading an unititialized variable is a compile time error.
         self.locals.add(name, -1);
     }
 
@@ -605,11 +663,15 @@ impl<'a> Parser<'a> {
         // Walk backwards to allow variables in the inner scope to shadow the
         // variables in the outer scopes.
         for (i, local) in self.locals.vars.iter().rev().enumerate() {
+            // We are running backwards, so correct the index
+            let i = self.locals.vars.len() - i - 1;
+
             if self.get_lexeme(&local.name) == self.get_lexeme(name) {
-                // If the local is in uninitialized state
+                // If the local is in an uninitialized state
                 if local.depth == -1 {
                     self.error("Cannot read variable in its own initializer.");
                 }
+
                 return Some(i as u32);
             }
         }
@@ -630,10 +692,54 @@ impl<'a> Parser<'a> {
     fn end_scope(&mut self) {
         self.locals.scope_depth -= 1;
 
-        // TODO Make it RuSty
+        // Pop all the local variables in the scope
         while !self.locals.vars.is_empty() && self.locals.last_depth() > self.locals.scope_depth {
             self.emit_opcode(OpCode::Pop);
             self.locals.vars.pop();
+        }
+    }
+
+    /// Pushes a new loop onto the loop stack
+    fn begin_loop(&mut self) -> usize {
+        let begin = self.chunk.code.len();
+        self.loops.push(Loop::new(self.locals.scope_depth, begin));
+        begin
+    }
+
+    /// Pops the loop and patches all its exit jump offsets
+    fn end_loop_and_patch(&mut self) {
+        let lox_loop = self.loops.pop();
+
+        // Patch all exit jumps
+        for end in lox_loop.unwrap().exit_jumps {
+            self.patch_jump(end);
+        }
+    }
+
+    /// Emit POP for the locals whose depth is greater than `max_depth`
+    fn emit_pop_for_locals(&mut self, max_depth: i32) {
+        let mut count = 0;
+
+        for local in self.locals.vars.iter().rev() {
+            if local.depth > max_depth {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+
+        for _ in 0..count {
+            self.emit_opcode(OpCode::Pop);
+        }
+    }
+
+    /// Returns the depth of the enclosing scope of the current innermost loop
+    #[inline]
+    fn innest_loop_depth(&self) -> Option<i32> {
+        if let Some(lloop) = self.loops.last() {
+            Some(lloop.scope_depth)
+        } else {
+            None
         }
     }
 
@@ -674,14 +780,13 @@ impl<'a> Parser<'a> {
         if operand < u8::MAX as u32 {
             self.chunk.write(opcode as u8, line);
             self.chunk.write(op_bytes[0], line);
-        } else if operand < u16::MAX as u32 {
-            self.chunk.write(OpCode::LongOperand as u8, line);
-            self.chunk.write(opcode as u8, line);
-            self.chunk.write(op_bytes[0], line);
-            self.chunk.write(op_bytes[1], line);
+        // } else if operand < u16::MAX as u32 {
+        //     self.chunk.write(OpCode::LongOperand as u8, line);
+        //     self.chunk.write(opcode as u8, line);
+        //     self.chunk.write(op_bytes[0], line);
+        //     self.chunk.write(op_bytes[1], line);
         } else {
-            eprintln!("Index byte too large for OpCode (maximum is {})", u16::MAX);
-            std::process::exit(1);
+            panic!("Index byte too large for OpCode (maximum is {})", u16::MAX);
         }
 
         operand
@@ -920,6 +1025,8 @@ fn identifier_type(ident: &str) -> TokenKind {
         "this" => This,
         "var" => Var,
         "while" => While,
+        "continue" => Continue,
+        "break" => Break,
         _ => Identifier,
     }
 }
