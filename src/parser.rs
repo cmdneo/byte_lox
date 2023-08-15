@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem::transmute, ops::Deref};
+use std::{cell::RefCell, mem::transmute};
 
 use crate::{
     chunk::{Chunk, OpCode},
@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Keeps info about the current loop for supporting
-/// `continue` and `break` statements
+/// `continue` and `break` statements.
 struct Loop {
     /// Depth of the scope the loop resides in
     scope_depth: i32,
@@ -293,6 +293,7 @@ impl<'a> Parser<'a> {
     }
 
     fn for_statement(&mut self) -> ParseResult {
+        // Scope for the for loop's initializer variable(if present)
         self.begin_scope();
         self.consume(TokenKind::LeftParen, "Expect '(' after 'for'.")?;
 
@@ -736,11 +737,7 @@ impl<'a> Parser<'a> {
     /// Returns the depth of the enclosing scope of the current innermost loop
     #[inline]
     fn innest_loop_depth(&self) -> Option<i32> {
-        if let Some(lloop) = self.loops.last() {
-            Some(lloop.scope_depth)
-        } else {
-            None
-        }
+        self.loops.last().map(|lloop| lloop.scope_depth)
     }
 
     #[inline]
@@ -777,14 +774,13 @@ impl<'a> Parser<'a> {
         let op_bytes = operand.to_le_bytes();
         let line = self.previous.line;
 
-        if operand < u8::MAX as u32 {
+        if operand <= u8::MAX as u32 {
             self.chunk.write(opcode as u8, line);
             self.chunk.write(op_bytes[0], line);
-        // } else if operand < u16::MAX as u32 {
-        //     self.chunk.write(OpCode::LongOperand as u8, line);
-        //     self.chunk.write(opcode as u8, line);
-        //     self.chunk.write(op_bytes[0], line);
-        //     self.chunk.write(op_bytes[1], line);
+        } else if operand <= u16::MAX as u32 {
+            self.chunk.write(opcode as u8 | 1u8 << 7, line);
+            self.chunk.write(op_bytes[0], line);
+            self.chunk.write(op_bytes[1], line);
         } else {
             panic!("Index byte too large for OpCode (maximum is {})", u16::MAX);
         }

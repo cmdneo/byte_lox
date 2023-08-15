@@ -12,33 +12,6 @@ use crate::{
 
 const STACK_MAX: usize = 256;
 
-/// Macro for boilerolate of form
-/// ```no_run
-/// match u8_integer {
-///     x if x == SomeEnum::Variant1 as u8 => { action }
-///     x if x == SomeEnum::Variant2 as u8 => { action }
-///     // ... and more
-///     // The wildcard(catch all) arm is required
-///     _ => { action }
-/// }
-/// ```
-///
-/// Which allows us to write just `SomeEnum::Variantx` instead of <br>
-/// `x if x == SomeEnum::Variantx as u8` in the match arms
-///
-/// We are using this because,
-/// converting u8 to OpCode enum requires checking everytime which may cause slowdowns.
-macro_rules! enum_u8_match {
-    (match $u8_value:ident {
-        $($variant:expr => $match_action:block)*
-        _ => $wild_action:block
-    }) => { match $u8_value {
-        $(x if ($variant as u8) == x => $match_action)*
-        _ => $wild_action
-        }
-    };
-}
-
 // Instead of popping off the value and then pushing it back.
 // Just modify the value in place at stack top.
 macro_rules! binary_arith_op {
@@ -290,14 +263,14 @@ impl VM {
                 // Jumps always has a 2-byte operand
                 OpCode::JumpIfFalse => {
                     let offset = self.read_operand(true);
-                    if self.peek(0).truthiness() == false {
+                    if !self.peek(0).truthiness() {
                         self.ip += offset;
                     }
                 }
 
                 OpCode::JumpIfTrue => {
                     let offset = self.read_operand(true);
-                    if self.peek(0).truthiness() == true {
+                    if self.peek(0).truthiness() {
                         self.ip += offset;
                     }
                 }

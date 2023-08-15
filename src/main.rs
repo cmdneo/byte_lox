@@ -29,6 +29,7 @@ fn run_repl() {
         line.clear();
         match io::stdin().read_line(&mut line) {
             Ok(size) => {
+                // We have EOF.
                 if size == 0 {
                     eprintln!("[EXIT]");
                     break;
@@ -40,7 +41,7 @@ fn run_repl() {
             }
         }
 
-        // Just to remove unused result warning
+        // Just to remove the unused result warning
         if vm.interpret(&line).is_err() {
             continue;
         }
@@ -48,11 +49,13 @@ fn run_repl() {
 }
 
 fn run_file(path: &str) {
-    let code = fs::read_to_string(path);
-    if let Err(err) = code {
-        eprintln!("Cannot read file '{}' because: {:?}", path, err.kind());
+    if let Ok(source) = fs::read_to_string(path) {
+        let mut vm = VM::new();
+        if vm.interpret(&source).is_err() {
+            exit(1);
+        }
+    } else {
+        eprintln!("Cannot read file '{}'.", path);
         exit(2);
     }
-
-    // let mut vm = VM::new();
 }
