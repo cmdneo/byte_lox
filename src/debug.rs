@@ -50,7 +50,10 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         Print => simple("PRINT", offset),
         Assert => simple("ASSERT", offset),
 
-        JumpIfFalse => jump("JUMP_IF_FALSE", chunk, offset),
+        JumpIfFalse => jump_instruction("JUMP_IF_FALSE", chunk, offset, 1),
+        JumpIfTrue => jump_instruction("JUMP_IF_TRUE", chunk, offset, 1),
+        Jump => jump_instruction("JUMP", chunk, offset, 1),
+        Loop => jump_instruction("LOOP", chunk, offset, -1),
 
         Return => simple("RETURN", offset),
     }
@@ -91,10 +94,16 @@ fn operand(name: &str, chunk: &Chunk, offset: usize) -> usize {
     offset
 }
 
-fn jump(name: &str, chunk: &Chunk, offset: usize) -> usize {
+/// Prints the jump instruction along with it's absolute jump position
+fn jump_instruction(name: &str, chunk: &Chunk, offset: usize, sign: i8) -> usize {
     let bytes = &chunk.code[offset + 1..offset + 3];
-    let jmp_offset = i16::from_le_bytes([bytes[0], bytes[1]]);
-    println!("{name:-16} {jmp_offset:4}");
+    let jmp_offset = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+
+    if sign > 0 {
+        println!("{name:-16} {jmp_offset:4} -> {}", offset + 3 + jmp_offset);
+    } else {
+        println!("{name:-16} {jmp_offset:4} -> {}", offset + 3 - jmp_offset);
+    }
 
     offset + 3
 }

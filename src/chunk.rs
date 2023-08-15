@@ -42,7 +42,7 @@ pub enum OpCode {
     Equal,
     NotEqual,
 
-    // Comparison operators, work number and string
+// Comparion operators, work number and string
     Greater,
     GreaterEqual,
     Less,
@@ -63,9 +63,15 @@ pub enum OpCode {
     Print,
     Assert,
 
+    // Jumps always use a 2-byte unsigned operand for the jump offset.
     /// Conditonal jump based on value on top of the stack.
-    /// Always uses a 2-byte operand for jump offset.
     JumpIfFalse,
+    /// Conditonal jump based on value on top of the stack.
+    JumpIfTrue,
+    /// Unconditional jump
+    Jump,
+    /// Unconditional backward jump
+    Loop,
 
     /// Return from a procedure
     Return,

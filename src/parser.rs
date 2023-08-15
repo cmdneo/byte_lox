@@ -136,6 +136,10 @@ impl<'a> Parser<'a> {
             self.assert_statement()
         } else if self.match_it(TokenKind::If) {
             self.if_statement()
+        } else if self.match_it(TokenKind::While) {
+            self.while_statement()
+        } else if self.match_it(TokenKind::For) {
+            self.for_statement()
         } else if self.match_it(TokenKind::LeftBrace) {
             self.begin_scope();
             let ret = self.block();
@@ -162,16 +166,133 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    // NOTE: In control flow statements the condition value needs to be explicitly
+    // popped off the stack.
+
     fn if_statement(&mut self) -> ParseResult {
+        // For popping the condition value we emit POP opcodes once in the
+        // if's body and once in the else's body. So, even if the user does not
+        // write any else branch, there always exists an implicit one.
+
         self.consume(TokenKind::LeftParen, "Expect '(' after 'if'.")?;
         self.expression()?;
         self.consume(TokenKind::RightParen, "Expect ')' after condition.")?;
 
-        todo!()
+        // For jumping after the if's body if the condition is false.
+        let then_jump = self.emit_jump(OpCode::JumpIfFalse);
+
+        // Begin if branch
+        self.emit_opcode(OpCode::Pop); // Pop condition
+        self.statement()?; // Body
+
+        // For jumping after the else's body if if's body is executed,
+        // otherwise the execution will fall through the else's body.
+        let else_jump = self.emit_jump(OpCode::Jump);
+
+        // End if branch
+        self.patch_jump(then_jump);
+
+        // Begin else branch
+        self.emit_opcode(OpCode::Pop); // Pop condition
+        if self.match_it(TokenKind::Else) {
+            self.statement()?; // Body
+        }
+
+        // End else branch
+        self.patch_jump(else_jump);
+
+        Ok(())
+    }
+
+    fn while_statement(&mut self) -> ParseResult {
+        // For popping the condition value we emit POP opcodes once in the
+        // while's body and once after its body.
+        let loop_begin = self.chunk.code.len();
+
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'while'.")?;
+        self.expression()?;
+        self.consume(TokenKind::RightParen, "Expect ')' after condition.")?;
+
+        let exit_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_opcode(OpCode::Pop); // Pop condition
+        self.statement()?; // Body
+        self.emit_loop(loop_begin);
+
+        self.patch_jump(exit_jump);
+        self.emit_opcode(OpCode::Pop); // Pop condition
+
+        Ok(())
+    }
+
+    fn for_statement(&mut self) -> ParseResult {
+        self.begin_scope();
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'for'.")?;
+
+        // All three clauses(initialize, condition and increment) are optional.
+        const CONDITION_ABSENT: usize = usize::MAX;
+
+        // The initializer clause
+        if self.match_it(TokenKind::Semicolon) {
+            // No initializer present
+        } else if self.match_it(TokenKind::Var) {
+            self.var_declaration()?;
+        } else {
+            self.expression_statement()?;
+        }
+
+        let mut loop_begin = self.chunk.code.len();
+        let exit_jump: usize;
+
+        // The condition clause
+        if self.match_it(TokenKind::Semicolon) {
+            // No condition clause means loop forever, so no jumps are needed here.
+            exit_jump = CONDITION_ABSENT;
+        } else {
+            self.expression()?;
+            self.consume(TokenKind::Semicolon, "Expect ';' after loop condition.")?;
+
+            // Jump out of the loop if the conditon is false
+            exit_jump = self.emit_jump(OpCode::JumpIfFalse);
+            self.emit_opcode(OpCode::Pop); // Pop condition
+        }
+
+        // The increment clause
+        // Now, since the increment clause runs after the body but it comes
+        // textually before it and our compiler is single pass type.
+        // Therefore, we jump over the increment to the start of the body, then at
+        // the end of the body we jump back to the increment execute it and then
+        // jump back to the start of the loop.
+        if !self.match_it(TokenKind::RightParen) {
+            let body_jump = self.emit_jump(OpCode::Jump);
+            let increment_begin = self.chunk.code.len();
+
+            self.expression()?;
+            self.emit_opcode(OpCode::Pop);
+            self.consume(TokenKind::RightParen, "Expect ')' after for clauses.")?;
+
+            self.emit_loop(loop_begin);
+            // Sets the loop opcode after body to jump to the increment clause.
+            loop_begin = increment_begin;
+            self.patch_jump(body_jump);
+        }
+
+        self.statement()?; // Loop body
+
+        self.emit_loop(loop_begin);
+
+        if exit_jump != CONDITION_ABSENT {
+            self.patch_jump(exit_jump);
+            // Pop condition after the loop ends if the condition is present.
+            self.emit_opcode(OpCode::Pop);
+        }
+
+        self.end_scope();
+
+        Ok(())
     }
 
     fn block(&mut self) -> ParseResult {
-        while !self.check(TokenKind::LeftBrace) && !self.check(TokenKind::Eof) {
+        while !self.check(TokenKind::RightBrace) && !self.check(TokenKind::Eof) {
             self.declaration()?;
         }
 
@@ -278,12 +399,50 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn and(&mut self) -> ParseResult {
+        // And returns the second operand if the first operand evaluates to true,
+        // otherwise the first operand.
+        let end_jump = self.emit_jump(OpCode::JumpIfFalse);
+
+        self.emit_opcode(OpCode::Pop);
+        self.parse_precedence(Precedence::And)?;
+
+        self.patch_jump(end_jump);
+        Ok(())
+    }
+
+    fn or(&mut self) -> ParseResult {
+        // Or returns the first operand if the first operand evaluates to true,
+        // otherwise the second operand.
+        let end_jump = self.emit_jump(OpCode::JumpIfTrue);
+
+        self.emit_opcode(OpCode::Pop);
+        self.parse_precedence(Precedence::Or)?;
+
+        self.patch_jump(end_jump);
+        Ok(())
+    }
+
     fn ternary(&mut self) -> ParseResult {
         // Ternary operator has the form: condition ? expr1 : expr2
-        self.expression()?; // Parse expr1
+        // We pop the condition value before the begining of each expression.
+        // Jump to the expr2 if condition is false
+        let false_jump = self.emit_jump(OpCode::JumpIfFalse);
+
+        self.emit_opcode(OpCode::Pop);
+        self.expression()?;
+
+        // Jump at the end to prevent falling through expr2 if expr1 is executed
+        let end_jump = self.emit_jump(OpCode::Jump);
+
         self.consume(TokenKind::Colon, "Expect ':' after expression")?;
 
-        self.parse_precedence(Precedence::Ternary)?; // Parse expr2
+        self.patch_jump(false_jump);
+
+        self.emit_opcode(OpCode::Pop);
+        self.parse_precedence(Precedence::Ternary)?;
+
+        self.patch_jump(end_jump);
 
         Ok(())
     }
@@ -494,16 +653,6 @@ impl<'a> Parser<'a> {
         self.chunk.write(byte, self.previous.line);
     }
 
-    /// Emits a jump opcode, fills the jump offset with junk and
-    /// returns the position of the associated 2-byte jump offset. <br>
-    /// Use `patch_jump` to set jump offset to the current position in bytecode.
-    fn emit_jump(&mut self, opcode: OpCode) -> usize {
-        self.emit_opcode(opcode);
-        self.emit_byte(0xFF);
-        self.emit_byte(0xFF);
-        self.chunk.code.len() - 2
-    }
-
     fn emit_constant(&mut self, value: Value) {
         let index = self.chunk.add_constant(value) as u32;
         self.emit_with_operand(OpCode::Constant, index);
@@ -531,6 +680,44 @@ impl<'a> Parser<'a> {
         }
 
         operand
+    }
+
+    fn emit_loop(&mut self, loop_begin: usize) {
+        self.emit_opcode(OpCode::Loop);
+        // +2 to adjust for the 2-byte jump offset to be emitted
+        let jmp_offset = self.chunk.code.len() - loop_begin + 2;
+
+        if jmp_offset > u16::MAX as usize {
+            panic!("Too much code to jump back: loop offset is too big.");
+        }
+
+        let bytes = (jmp_offset as u16).to_le_bytes();
+        self.emit_byte(bytes[0]);
+        self.emit_byte(bytes[1]);
+    }
+
+    /// Emits a jump opcode, fills the jump offset with a placeholder and
+    /// returns the position of the associated 2-byte jump offset. <br>
+    /// Use `patch_jump` to set jump offset to the current position in bytecode.
+    fn emit_jump(&mut self, opcode: OpCode) -> usize {
+        self.emit_opcode(opcode);
+        self.emit_byte(0xFF);
+        self.emit_byte(0xFF);
+        self.chunk.code.len() - 2
+    }
+
+    /// Sets the jump offset to point to the just next opcode to be emitted.
+    fn patch_jump(&mut self, offset: usize) {
+        // -2 to adjust for the 2-byte jump offset to be emitted
+        let jmp_offset = self.chunk.code.len() - offset - 2;
+
+        if jmp_offset > u16::MAX as usize {
+            panic!("Too much code to jump over: jump offset is too big.");
+        }
+
+        let bytes = (jmp_offset as u16).to_le_bytes();
+        self.chunk.code[offset] = bytes[0];
+        self.chunk.code[offset + 1] = bytes[1];
     }
 
     // Token matching/processing methods
@@ -621,6 +808,9 @@ impl<'a> Parser<'a> {
             | TokenKind::GreaterEqual
             | TokenKind::Less
             | TokenKind::LessEqual => self.binary(),
+
+            TokenKind::And => self.and(),
+            TokenKind::Or => self.or(),
 
             // Actually every operator that is not prefix is considered infix
             TokenKind::Question => self.ternary(),

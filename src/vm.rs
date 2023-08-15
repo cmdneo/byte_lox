@@ -296,7 +296,30 @@ impl VM {
                     }
                 }
 
-                OpCode::JumpIfFalse => {}
+                // Jumps always has a 2-byte operand
+                OpCode::JumpIfFalse => {
+                    let offset = self.read_operand(true);
+                    if self.peek(0).truthiness() == false {
+                        self.ip += offset;
+                    }
+                }
+
+                OpCode::JumpIfTrue => {
+                    let offset = self.read_operand(true);
+                    if self.peek(0).truthiness() == true {
+                        self.ip += offset;
+                    }
+                }
+
+                OpCode::Jump => {
+                    let offset = self.read_operand(true);
+                    self.ip += offset;
+                }
+
+                OpCode::Loop => {
+                    let offset = self.read_operand(true);
+                    self.ip -= offset;
+                }
 
                 OpCode::Return => {
                     return Ok(());
