@@ -1,4 +1,4 @@
-use crate::object::{GcObject, ObjectKind};
+use crate::object::{GcObject, Object, ObjectKind};
 
 pub struct GarbageCollector {
     objects: Vec<GcObject>,
@@ -7,15 +7,19 @@ pub struct GarbageCollector {
 impl GarbageCollector {
     pub fn new() -> Self {
         GarbageCollector {
-            objects: Vec::with_capacity(8),
+            objects: Vec::with_capacity(64),
         }
     }
 
-    pub fn create_object(&mut self, object: ObjectKind) -> GcObject {
-        let new_obj = unsafe { GcObject::allocate(object) };
-        self.objects.push(new_obj);
+    pub fn collect(&mut self) {
+        todo!()
+    }
 
-        new_obj
+    pub fn create_object(&mut self, object: ObjectKind) -> GcObject {
+        let gc_object = unsafe { GcObject::allocate(object) };
+        self.objects.push(gc_object);
+
+        gc_object
     }
 }
 

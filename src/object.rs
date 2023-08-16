@@ -1,5 +1,4 @@
 use std::{
-    alloc,
     cmp::Ordering,
     fmt,
     ops::{Deref, DerefMut},
@@ -26,6 +25,16 @@ impl fmt::Display for Object {
     }
 }
 
+impl Default for Object {
+    fn default() -> Self {
+        Self {
+            marked: false,
+            hash: 0,
+            kind: ObjectKind::Invalid,
+        }
+    }
+}
+
 /// Representation for different kind of dynamically allocated Lox Objects
 pub enum ObjectKind {
     // Not using string::String as size of a string is always fixed
@@ -33,6 +42,7 @@ pub enum ObjectKind {
     Instance,
     Class,
     Function,
+    Invalid,
 }
 
 impl ObjectKind {
@@ -59,6 +69,7 @@ impl fmt::Display for ObjectKind {
             Self::Instance => write!(f, "<instance of !>"),
             Self::Class => write!(f, "<class !>"),
             Self::Function => write!(f, "<fn !>"),
+            Self::Invalid => unreachable!(),
         }
     }
 }
@@ -83,26 +94,20 @@ impl GcObject {
     }
 
     pub unsafe fn allocate(object: ObjectKind) -> Self {
-        let layout = alloc::Layout::new::<Object>();
-        let ptr = alloc::alloc(layout);
-        if ptr.is_null() {
-            alloc::handle_alloc_error(layout);
-        }
+        let new_object = Box::new(Object::default());
+        let ptr = Box::leak(new_object) as *mut Object;
 
-        let object_ptr = ptr as *mut Object;
-        *object_ptr = Object {
+        ptr.replace(Object {
             marked: false,
-            hash: object.hash(object_ptr),
+            hash: object.hash(ptr),
             kind: object,
-        };
+        });
 
-        GcObject { object: object_ptr }
+        GcObject { object: ptr }
     }
 
     pub unsafe fn deallocate(self) {
-        let layout = alloc::Layout::new::<Object>();
-        self.object.drop_in_place();
-        alloc::dealloc(self.object as *mut u8, layout);
+        drop(Box::from_raw(self.object));
     }
 }
 
@@ -133,12 +138,14 @@ impl Deref for GcObject {
     type Target = Object;
 
     fn deref(&self) -> &Self::Target {
+        debug_assert!(!self.object.is_null());
         unsafe { self.object.as_ref().unwrap() }
     }
 }
 
 impl DerefMut for GcObject {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        debug_assert!(!self.object.is_null());
         unsafe { self.object.as_mut().unwrap() }
     }
 }
