@@ -8,6 +8,7 @@ pub(crate) mod locals;
 pub(crate) mod object;
 pub(crate) mod parser;
 pub(crate) mod scanner;
+pub(crate) mod stack;
 pub(crate) mod strings;
 pub(crate) mod table;
 pub(crate) mod value;
