@@ -52,14 +52,19 @@ impl<T, const CAP: usize> Stack<T, CAP> {
         self.sp
     }
 
-    pub fn clear(&mut self) {
-        for i in (0..self.sp).rev() {
+    pub fn set_len(&mut self, new_len: usize) {
+        for i in (new_len..self.sp).rev() {
+            // Everything before self.sp is initialized
             unsafe {
                 self.array[i].assume_init_drop();
             }
         }
 
-        self.sp = 0;
+        self.sp = new_len;
+    }
+
+    pub fn clear(&mut self) {
+        self.set_len(0);
     }
 }
 
