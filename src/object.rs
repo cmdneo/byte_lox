@@ -41,8 +41,26 @@ pub enum ObjectKind {
     String(Box<str>),
     Instance,
     Class,
-    Function,
+    Function(Function),
     Invalid,
+}
+
+pub struct Function {
+    pub name: GcObject,
+    pub begin: u32,
+    pub end: u32,
+    pub arity: u32,
+}
+
+impl Function {
+    pub fn named(name: GcObject) -> Self {
+        Self {
+            name,
+            begin: 0,
+            end: 0,
+            arity: 0,
+        }
+    }
 }
 
 impl ObjectKind {
@@ -62,13 +80,19 @@ impl From<String> for ObjectKind {
     }
 }
 
+impl From<Function> for ObjectKind {
+    fn from(value: Function) -> Self {
+        Self::Function(value)
+    }
+}
+
 impl fmt::Display for ObjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::String(s) => write!(f, "{s}"),
             Self::Instance => write!(f, "<instance of !>"),
             Self::Class => write!(f, "<class !>"),
-            Self::Function => write!(f, "<fn !>"),
+            Self::Function(fun) => write!(f, "<fn {}>", fun.name),
             Self::Invalid => unreachable!(),
         }
     }

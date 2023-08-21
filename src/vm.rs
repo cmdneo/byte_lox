@@ -4,14 +4,15 @@ use crate::{
     chunk::{Chunk, OpCode},
     compiler, debug,
     garbage::GarbageCollector,
-    object::GcObject,
+    object::{Function, GcObject, ObjectKind},
     stack::Stack,
-    strings::{add_strings, StringCreator},
+    strings::add_strings,
     table::Table,
     value::Value,
 };
 
-const STACK_MAX: usize = 256;
+const CALL_DEPTH_MAX: usize = 256;
+const STACK_MAX: usize = 8192;
 
 // Instead of popping off the value and then pushing it back.
 // Just modify the value in place at stack top.
@@ -39,6 +40,8 @@ pub struct VM {
     ip: usize,
     /// Stack for storing temporararies and local variables
     stack: Stack<Value, STACK_MAX>,
+    /// Call stack
+    call_stack: Stack<CallFrame, CALL_DEPTH_MAX>,
     /// Interned strings collection table
     strings: Table<()>,
     /// Global variables table
@@ -50,6 +53,16 @@ pub struct VM {
 pub enum InterpretError {
     Compile,
     Runtime,
+}
+
+#[derive(Clone, Copy)]
+struct CallFrame {
+    /// Return address
+    ra: u32,
+    /// Frame/base pointer
+    fp: u32,
+    /// The function object
+    function: GcObject,
 }
 
 type InterpretResult = Result<(), InterpretError>;
@@ -68,6 +81,7 @@ impl VM {
             chunk: Chunk::default(),
             ip: 0,
             stack: Stack::new(),
+            call_stack: Stack::new(),
             strings: Table::new(),
             globals: Table::new(),
             gc: GarbageCollector::new(),
@@ -76,9 +90,8 @@ impl VM {
 
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
         let chunk: Chunk;
-        let sc = StringCreator::new(&mut self.gc, &mut self.strings);
 
-        if let Ok(ch) = compiler::compile(source, sc) {
+        if let Ok(ch) = compiler::compile(source, &mut self.gc) {
             chunk = ch;
         } else {
             return Err(InterpretError::Compile);
@@ -92,9 +105,31 @@ impl VM {
     fn reset_vm(&mut self) {
         self.ip = 0;
         self.stack.clear();
+
+        // TODO cleanup
+        let name = self
+            .gc
+            .create_object(ObjectKind::from(String::from("<script>")));
+        let function = self
+            .gc
+            .create_object(ObjectKind::from(Function::named(name)));
+
+        self.call_stack.push(CallFrame {
+            ra: 0,
+            fp: 0,
+            function,
+        });
+        self.stack.push(Value::Nil);
+    }
+
+    /// Returns the currently active call frame
+    fn frame(&self) -> CallFrame {
+        self.call_stack.top().clone()
     }
 
     fn run(&mut self) -> InterpretResult {
+        let frame = self.frame();
+
         loop {
             if cfg!(feature = "trace_execution") {
                 // Dump the stack
@@ -214,8 +249,7 @@ impl VM {
                     if self.stack.top().clone().is_string() {
                         let rhs = self.pop();
                         let lhs = self.pop();
-                        let sc = StringCreator::new(&mut self.gc, &mut self.strings);
-                        let result = add_strings(&lhs, &rhs, sc);
+                        let result = add_strings(&lhs, &rhs, &mut self.gc);
                         self.push(result);
                     } else {
                         binary_arith_op!(self, add);

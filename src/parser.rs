@@ -3,9 +3,10 @@ use std::{cell::RefCell, mem::transmute};
 use crate::{
     chunk::{Chunk, OpCode},
     debug,
+    garbage::GarbageCollector,
     locals::Locals,
+    object::{Function, ObjectKind},
     scanner::{Scanner, Token, TokenKind},
-    strings::StringCreator,
     table::Table,
     value::Value,
 };
@@ -52,8 +53,8 @@ pub struct Parser<'a> {
     loops: Vec<Loop>,
     /// Global to constant-index table to avoid duplicating identifiers
     global_constant_table: Table<u32>,
-    /// For allocating interned string literals
-    string_creator: StringCreator<'a>,
+    /// For allocating **interned** string literals
+    gc: &'a mut GarbageCollector,
     /// Internal error state tracker
     // Use interior mutability to avoid uncesesary mutability
     had_error: RefCell<bool>,
@@ -89,7 +90,7 @@ fn next_precedence(precedence: Precedence) -> Precedence {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str, string_creator: StringCreator<'a>) -> Self {
+    pub fn new(source: &'a str, gc: &'a mut GarbageCollector) -> Self {
         Self {
             current: Token::default(),
             previous: Token::default(),
@@ -97,9 +98,9 @@ impl<'a> Parser<'a> {
             source,
             chunk: Chunk::new(),
             locals: Locals::new(),
-            loops: Vec::new(),
+            loops: Vec::with_capacity(4),
             global_constant_table: Table::new(),
-            string_creator,
+            gc,
             had_error: RefCell::new(false),
         }
     }
@@ -133,6 +134,8 @@ impl<'a> Parser<'a> {
     fn declaration(&mut self) -> ParseResult {
         if self.match_it(TokenKind::Var) {
             self.var_declaration()
+        //} else if self.match_it(TokenKind::Fun) {
+        //    self.fun_declaration()
         } else {
             self.statement()
         }
@@ -356,6 +359,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parses: declarations* '}'
     fn block(&mut self) -> ParseResult {
         while !self.check(TokenKind::RightBrace) && !self.check(TokenKind::Eof) {
             self.declaration()?;
@@ -542,7 +546,7 @@ impl<'a> Parser<'a> {
         let string = lexeme[1..lexeme.len() - 1].to_string();
 
         // A string object is heap allocated, hence use the GC to create it.
-        let object = self.string_creator.create(string);
+        let object = self.gc.intern_string(string);
         self.emit_constant(Value::Object(object));
 
         Ok(())
@@ -550,6 +554,7 @@ impl<'a> Parser<'a> {
 
     // Parsing Helper methods
     //-----------------------------------------------------
+
     fn parse_number(&self, token: &Token) -> Result<f64, ()> {
         match self.get_lexeme(token).parse::<f64>() {
             Ok(num) => Ok(num),
@@ -601,6 +606,8 @@ impl<'a> Parser<'a> {
         Ok(self.add_identifier_constant(&name))
     }
 
+    // Utility methods
+    //-----------------------------------------------------
     fn declare_variable(&mut self) {
         // Global variables are late bound so we don't care about them here.
         if self.locals.scope_depth == 0 {
@@ -609,11 +616,9 @@ impl<'a> Parser<'a> {
 
         let name = self.previous;
 
-        // Check if the variable with the same name exists in the current
-        // local scope, it it exists then it is an error to do so.
+        // Check if the local variable with the same name exists in the
+        // current local scope, if it exists then it is an error to do so.
         for local in self.locals.vars.iter().rev() {
-            // Search backwards and stop once we are not in the current scope,
-            // because the current scope is always at the end
             if local.depth != -1 && local.depth < self.locals.scope_depth {
                 break;
             }
@@ -631,7 +636,6 @@ impl<'a> Parser<'a> {
     fn define_variable(&mut self, index: u32) {
         // Local variables are stored on the stack decided at compile time.
         // We not need any extra code to create a local variable at runtime.
-        // We just need to mark that the local variable is initialized.
         if self.locals.scope_depth > 0 {
             self.mark_initialized();
             return;
@@ -646,7 +650,7 @@ impl<'a> Parser<'a> {
     /// Adds the identifier to chunk's constant table as a string object
     fn add_identifier_constant(&mut self, name: &Token) -> u32 {
         let ident = self.get_lexeme(name).to_string();
-        let ident = self.string_creator.create(ident);
+        let ident = self.gc.intern_string(ident);
 
         // If the identifier is not found in the global constant table then,
         // add it to the global constant table, otherwise use the found constant.
@@ -680,8 +684,13 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// Marks the last local variable declared as initialized/defined
+    /// if currently not in global scope.
     #[inline]
     fn mark_initialized(&mut self) {
+        if self.locals.scope_depth == 0 {
+            return;
+        }
         self.locals.vars.last_mut().unwrap().depth = self.locals.scope_depth;
     }
 
@@ -761,6 +770,7 @@ impl<'a> Parser<'a> {
         self.chunk.write(byte, self.previous.line);
     }
 
+    /// Add the value to chunk's constant table and opcode for it
     fn emit_constant(&mut self, value: Value) {
         let index = self.chunk.add_constant(value) as u32;
         self.emit_with_operand(OpCode::Constant, index);
