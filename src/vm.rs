@@ -154,6 +154,8 @@ impl VM {
 
             let byte = self.next_byte();
             let is_long = byte >> 7 == 1;
+            // All bytes generated are valid opcode
+            // let opcode = unsafe { std::mem::transmute::<u8, OpCode>(byte) };
             let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
                 panic!("Unknown opcode '{byte}' at offset {}", self.frame.ip - 1);
             });
@@ -331,13 +333,22 @@ impl VM {
                 // So the arguments start from slot one.
                 OpCode::Call => {
                     let arg_count = self.read_operand(is_long);
-                    // The function object is before the arguments on stack
+                    // The function object is before the arguments on stack.s
+                    // It is popped after the function call finishes
                     self.call_value(self.peek(arg_count), arg_count)?;
                 }
 
                 OpCode::Return => {
-                    // Discard chunk on return
-                    return Ok(());
+                    let result = self.pop();
+                    // Discard the function's stack window
+                    self.stack.set_len(self.frame.fp);
+                    self.frame = self.call_frames.pop();
+
+                    if self.call_frames.len() == 0 {
+                        return Ok(());
+                    }
+
+                    self.push(result);
                 }
             }
         }

@@ -166,7 +166,6 @@ impl<'a> Parser<'a> {
 
     /// Pop the current parsing context and return the generated function object
     fn end_context(&mut self, arity: u32) -> Function {
-        self.emit_opcode(OpCode::Nil);
         self.emit_opcode(OpCode::Return);
 
         if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
@@ -244,6 +243,8 @@ impl<'a> Parser<'a> {
             self.continue_statement()
         } else if self.match_it(TokenKind::Break) {
             self.break_statement()
+        } else if self.match_it(TokenKind::Return) {
+            self.return_statement()
         } else if self.match_it(TokenKind::If) {
             self.if_statement()
         } else if self.match_it(TokenKind::While) {
@@ -307,9 +308,25 @@ impl<'a> Parser<'a> {
         self.consume(TokenKind::Semicolon, "Expect ';' after 'break'.")
     }
 
+    fn return_statement(&mut self) -> ParseResult {
+        if self.old_contexts.len() == 1 {
+            self.error("Cannot return from top-level code.");
+        }
+
+        if self.match_it(TokenKind::Semicolon) {
+            self.emit_opcode(OpCode::Nil);
+            self.emit_opcode(OpCode::Return);
+        } else {
+            self.expression()?;
+            self.consume(TokenKind::Semicolon, "Expect ';' after return value.")?;
+            self.emit_opcode(OpCode::Return)
+        }
+
+        Ok(())
+    }
+
     // NOTE: In control flow statements the condition value needs to be explicitly
     // popped off the stack.
-
     fn if_statement(&mut self) -> ParseResult {
         // For popping the condition value we emit POP opcodes once in the
         // if's body and once in the else's body. So, even if the user does not
