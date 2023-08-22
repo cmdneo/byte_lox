@@ -72,6 +72,8 @@ pub enum OpCode {
     Jump,
     /// Unconditional backward jump
     Loop,
+    /// Call a procedure
+    Call,
 
     /// Return from a procedure
     Return,

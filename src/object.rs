@@ -2,9 +2,10 @@ use std::{
     cmp::Ordering,
     fmt,
     ops::{Deref, DerefMut},
+    ptr::null_mut,
 };
 
-use crate::strings::hash_string;
+use crate::{chunk::Chunk, strings::hash_string};
 
 /// Heap allocated Lox Objects, with mark and sweep garbage collection.
 /// The actual object is stored as a pointer, it's allocation and deallocation
@@ -47,8 +48,7 @@ pub enum ObjectKind {
 
 pub struct Function {
     pub name: GcObject,
-    pub begin: u32,
-    pub end: u32,
+    pub chunk: Chunk,
     pub arity: u32,
 }
 
@@ -56,8 +56,7 @@ impl Function {
     pub fn named(name: GcObject) -> Self {
         Self {
             name,
-            begin: 0,
-            end: 0,
+            chunk: Chunk::new(),
             arity: 0,
         }
     }
@@ -80,12 +79,6 @@ impl From<String> for ObjectKind {
     }
 }
 
-impl From<Function> for ObjectKind {
-    fn from(value: Function) -> Self {
-        Self::Function(value)
-    }
-}
-
 impl fmt::Display for ObjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -105,7 +98,7 @@ impl fmt::Display for ObjectKind {
 ///
 /// To ensure that it is always added to the VM's GC, create it only via the
 /// interface provided by GarbageCollector instead of creating it directly.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct GcObject {
     object: *mut Object,
 }
@@ -132,6 +125,12 @@ impl GcObject {
 
     pub unsafe fn deallocate(self) {
         drop(Box::from_raw(self.object));
+    }
+}
+
+impl Default for GcObject {
+    fn default() -> Self {
+        Self { object: null_mut() }
     }
 }
 

@@ -20,7 +20,7 @@ pub fn add_strings(lhs: &Value, rhs: &Value, gc: &mut GarbageCollector) -> Value
         (Value::Object(x), Value::Object(y)) => match (&x.kind, &y.kind) {
             (ObjectKind::String(s), ObjectKind::String(t)) => {
                 let result = s.to_string() + t;
-                let object = gc.create_string(result);
+                let object = gc.intern_string(result);
 
                 Value::Object(object)
             }

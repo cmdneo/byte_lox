@@ -53,6 +53,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         JumpIfTrue => jump_instruction("JUMP_IF_TRUE", chunk, offset, 1),
         Jump => jump_instruction("JUMP", chunk, offset, 1),
         Loop => jump_instruction("LOOP", chunk, offset, -1),
+        Call => operand("CALL", chunk, offset),
 
         Return => simple("RETURN", offset),
     }
@@ -60,7 +61,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
 
 /// Disaasembles a chunk and pretty prints it.
 pub fn disassemble_chunk(chunk: &Chunk, name: &str) {
-    println!("===== {name} =====");
+    println!("==== {name} ====");
 
     let mut offset = 0usize;
     while offset < chunk.code.len() {

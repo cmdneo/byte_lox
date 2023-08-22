@@ -1,11 +1,14 @@
-use std::{cell::RefCell, mem::transmute};
+use std::{
+    cell::RefCell,
+    mem::{replace, transmute},
+};
 
 use crate::{
     chunk::{Chunk, OpCode},
     debug,
     garbage::GarbageCollector,
     locals::Locals,
-    object::{Function, ObjectKind},
+    object::{Function, GcObject, ObjectKind},
     scanner::{Scanner, Token, TokenKind},
     table::Table,
     value::Value,
@@ -33,27 +36,47 @@ impl Loop {
     }
 }
 
+struct Context {
+    /// Global identifiers to chunk's constant index table to
+    /// avoid duplicating identifiers whenever they are encountered.
+    ident_index_table: Table<u32>,
+    /// The associated function object
+    function: Function,
+    /// For resolving and tracking local variables
+    locals: Locals,
+}
+
+impl Context {
+    fn new(name: GcObject) -> Self {
+        Self {
+            ident_index_table: Table::new(),
+            function: Function::named(name),
+            locals: Locals::new(),
+        }
+    }
+}
+
 /// This module parses raw Lox source and generates the bytecode for it,
 /// to be executed by the VM module.
 /// All errors are reported by this module.
 pub struct Parser<'a> {
     /// Current token
-    pub current: Token,
+    current: Token,
     /// Previous token
-    pub previous: Token,
+    previous: Token,
     /// The token maker - lexer
     scanner: Scanner<'a>,
     /// Read-only source for extracting lexeme of tokens
     source: &'a str,
-    /// Current chunk for codegen
-    chunk: Chunk,
-    /// Current local variables info
-    locals: Locals,
+    /// Enclosing contexts
+    old_contexts: Vec<Context>,
+    /// Current context, inside which we are generating code
+    context: Context,
+    // Current scope depth
+    scope_depth: i32,
     /// Loop info for creating jump opcodes for `break` and `continue`
     loops: Vec<Loop>,
-    /// Global to constant-index table to avoid duplicating identifiers
-    global_constant_table: Table<u32>,
-    /// For allocating **interned** string literals
+    /// For allocating objects generated during compilation to bytecode
     gc: &'a mut GarbageCollector,
     /// Internal error state tracker
     // Use interior mutability to avoid uncesesary mutability
@@ -96,16 +119,21 @@ impl<'a> Parser<'a> {
             previous: Token::default(),
             scanner: Scanner::new(source),
             source,
-            chunk: Chunk::new(),
-            locals: Locals::new(),
+            old_contexts: Vec::with_capacity(4),
+            // Put a dummy context, it is never used
+            context: Context::new(GcObject::default()),
+            scope_depth: 0,
             loops: Vec::with_capacity(4),
-            global_constant_table: Table::new(),
             gc,
             had_error: RefCell::new(false),
         }
     }
 
-    pub fn parse(mut self) -> Result<Chunk, ()> {
+    /// Parsed the source and returns the resulting function Object
+    pub fn parse(mut self) -> Result<GcObject, ()> {
+        let name = self.gc.intern_string(String::from("<script>"));
+        self.begin_context(name);
+
         self.advance(); // Prime the parser
 
         while !self.match_it(TokenKind::Eof) {
@@ -116,17 +144,49 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.finalize_chunk();
+        let function = self.end_context(0);
 
         if self.had_error.take() {
             Err(())
         } else {
-            if cfg!(feature = "trace_codegen") {
-                debug::disassemble_chunk(&self.chunk, "Code");
-            }
-
-            Ok(self.chunk)
+            Ok(self.gc.create_object(ObjectKind::Function(function)))
         }
+    }
+
+    //-----------------------------------------------------
+    // Parsing Context management
+    /// Push a new parsing context
+    fn begin_context(&mut self, name: GcObject) {
+        self.old_contexts
+            .push(replace(&mut self.context, Context::new(name)));
+
+        // Slot zero of every function's stack frame is reserved for internal use.
+        self.context.locals.push(Token::default(), 0);
+    }
+
+    /// Pop the current parsing context and return the generated function object
+    fn end_context(&mut self, arity: u32) -> Function {
+        self.emit_opcode(OpCode::Nil);
+        self.emit_opcode(OpCode::Return);
+
+        if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
+            let name = self.context.function.name.to_string();
+            let name = if name == "<script>" {
+                name
+            } else {
+                format!("<fn {}>", name)
+            };
+
+            debug::disassemble_chunk(&self.chunk(), &name);
+        }
+
+        self.context.function.arity = arity;
+        replace(&mut self.context, self.old_contexts.pop().unwrap()).function
+    }
+
+    #[inline(always)]
+    fn chunk(&mut self) -> &mut Chunk {
+        &mut self.context.function.chunk
     }
 
     // Statement parsing methods
@@ -134,8 +194,8 @@ impl<'a> Parser<'a> {
     fn declaration(&mut self) -> ParseResult {
         if self.match_it(TokenKind::Var) {
             self.var_declaration()
-        //} else if self.match_it(TokenKind::Fun) {
-        //    self.fun_declaration()
+        } else if self.match_it(TokenKind::Fun) {
+            self.fun_declaration()
         } else {
             self.statement()
         }
@@ -157,6 +217,19 @@ impl<'a> Parser<'a> {
 
         // A variable is defined only if it has been initialized
         // before it is assumed declared only
+        self.define_variable(global);
+
+        Ok(())
+    }
+
+    fn fun_declaration(&mut self) -> ParseResult {
+        let global = self.parse_new_variable("Expect function name after 'fun'.")?;
+        self.mark_initialized(); // A function can call itself
+
+        let index = self.function()?;
+
+        // The function object is value for the variable obvisouly
+        self.emit_with_operand(OpCode::Constant, index);
         self.define_variable(global);
 
         Ok(())
@@ -332,7 +405,7 @@ impl<'a> Parser<'a> {
         // jump back to the start of the loop.
         if !self.match_it(TokenKind::RightParen) {
             let body_jump = self.emit_jump(OpCode::Jump);
-            let increment_begin = self.chunk.code.len();
+            let increment_begin = self.chunk().code.len();
 
             self.expression()?;
             self.emit_opcode(OpCode::Pop);
@@ -516,6 +589,12 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn call(&mut self) -> ParseResult {
+        let count = self.argument_list()?;
+        self.emit_with_operand(OpCode::Call, count);
+        Ok(())
+    }
+
     fn literal(&mut self) -> ParseResult {
         let opcode = match self.previous.kind {
             TokenKind::False => OpCode::False,
@@ -554,6 +633,63 @@ impl<'a> Parser<'a> {
 
     // Parsing Helper methods
     //-----------------------------------------------------
+    /// Parse function parameter list and its body, then adds the resulting
+    /// function object to the chunk's constant table.
+    /// Returns the index for function object.
+    fn function(&mut self) -> Result<u32, ()> {
+        let name = self.get_lexeme(&self.previous).to_string();
+        let name = self.gc.intern_string(name);
+        let mut arity = 0u32;
+
+        self.begin_context(name);
+        self.begin_scope();
+
+        self.consume(TokenKind::LeftParen, "Expect '(' after function name.")?;
+
+        if !self.check(TokenKind::RightParen) {
+            loop {
+                // Max number of parameters is 2^16
+                arity += 1;
+                let param = self.parse_new_variable("Expect parameter name.")?;
+                self.define_variable(param);
+
+                if !self.match_it(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(TokenKind::RightParen, "Expect ')' after parameters.")?;
+        self.consume(TokenKind::LeftBrace, "Expect '{' before function body.")?;
+        self.block()?;
+
+        self.end_scope();
+        let function = self.end_context(arity);
+
+        // Make the function object and add it to enclosing chunk's contant table
+        let function = self.gc.create_object(ObjectKind::Function(function));
+        Ok(self.chunk().add_constant(Value::Object(function)) as u32)
+    }
+
+    fn argument_list(&mut self) -> Result<u32, ()> {
+        let mut arg_count = 0u32;
+
+        if !self.check(TokenKind::RightParen) {
+            loop {
+                // Max number of arguments is 2^16
+                self.expression()?;
+                arg_count += 1;
+
+                if !self.match_it(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(TokenKind::RightParen, "Expect ')' after arguments.")?;
+
+        Ok(arg_count)
+    }
 
     fn parse_number(&self, token: &Token) -> Result<f64, ()> {
         match self.get_lexeme(token).parse::<f64>() {
@@ -576,6 +712,7 @@ impl<'a> Parser<'a> {
             (OpCode::SetGlobal, OpCode::GetGlobal)
         };
 
+        // If no local variable found then it is global
         let index = index.unwrap_or(self.add_identifier_constant(name));
 
         if can_assign && self.match_it(TokenKind::Equal) {
@@ -595,7 +732,7 @@ impl<'a> Parser<'a> {
 
         // Local variables are resovled at compile time, so there is no need to
         // store their names for the runtime.
-        if self.locals.scope_depth > 0 {
+        if self.scope_depth > 0 {
             return Ok(0);
         }
 
@@ -610,7 +747,7 @@ impl<'a> Parser<'a> {
     //-----------------------------------------------------
     fn declare_variable(&mut self) {
         // Global variables are late bound so we don't care about them here.
-        if self.locals.scope_depth == 0 {
+        if self.scope_depth == 0 {
             return;
         }
 
@@ -618,8 +755,8 @@ impl<'a> Parser<'a> {
 
         // Check if the local variable with the same name exists in the
         // current local scope, if it exists then it is an error to do so.
-        for local in self.locals.vars.iter().rev() {
-            if local.depth != -1 && local.depth < self.locals.scope_depth {
+        for local in self.context.locals.iter().rev() {
+            if local.depth != -1 && local.depth < self.scope_depth {
                 break;
             }
 
@@ -630,13 +767,13 @@ impl<'a> Parser<'a> {
 
         // We indicate that a local variable is uninitialized by setting
         // its depth to -1. Reading an unititialized variable is a compile time error.
-        self.locals.add(name, -1);
+        self.context.locals.push(name, -1);
     }
 
     fn define_variable(&mut self, index: u32) {
         // Local variables are stored on the stack decided at compile time.
         // We not need any extra code to create a local variable at runtime.
-        if self.locals.scope_depth > 0 {
+        if self.scope_depth > 0 {
             self.mark_initialized();
             return;
         }
@@ -652,24 +789,27 @@ impl<'a> Parser<'a> {
         let ident = self.get_lexeme(name).to_string();
         let ident = self.gc.intern_string(ident);
 
-        // If the identifier is not found in the global constant table then,
-        // add it to the global constant table, otherwise use the found constant.
+        // If the identifier is not found in the indentifier index table then,
+        // add it to it, otherwise use the found constant.
         // Doing so avoids adding an identifier to the chunks's constants table every
         // time it is encountered instead we just reuse the old entry.
-        self.global_constant_table.find(ident).unwrap_or_else(|| {
-            let index = self.chunk.add_constant(Value::Object(ident)) as u32;
-            self.global_constant_table.insert(ident, index);
-            index
-        })
+        self.context
+            .ident_index_table
+            .find(ident)
+            .unwrap_or_else(|| {
+                let index = self.chunk().add_constant(Value::Object(ident)) as u32;
+                self.context.ident_index_table.insert(ident, index);
+                index
+            })
     }
 
     /// Returns the position(at runtime) of the local variable on the stack
     fn resolve_local(&self, name: &Token) -> Option<u32> {
         // Walk backwards to allow variables in the inner scope to shadow the
         // variables in the outer scopes.
-        for (i, local) in self.locals.vars.iter().rev().enumerate() {
+        for (i, local) in self.context.locals.iter().rev().enumerate() {
             // We are running backwards, so correct the index
-            let i = self.locals.vars.len() - i - 1;
+            let i = self.context.locals.len() - i - 1;
 
             if self.get_lexeme(&local.name) == self.get_lexeme(name) {
                 // If the local is in an uninitialized state
@@ -688,31 +828,32 @@ impl<'a> Parser<'a> {
     /// if currently not in global scope.
     #[inline]
     fn mark_initialized(&mut self) {
-        if self.locals.scope_depth == 0 {
+        if self.scope_depth == 0 {
             return;
         }
-        self.locals.vars.last_mut().unwrap().depth = self.locals.scope_depth;
+        self.context.locals.set_last_depth(self.scope_depth);
     }
 
     #[inline]
     fn begin_scope(&mut self) {
-        self.locals.scope_depth += 1;
+        self.scope_depth += 1;
     }
 
     fn end_scope(&mut self) {
-        self.locals.scope_depth -= 1;
+        self.scope_depth -= 1;
 
         // Pop all the local variables in the scope
-        while !self.locals.vars.is_empty() && self.locals.last_depth() > self.locals.scope_depth {
+        while !self.context.locals.is_empty() && self.context.locals.last_depth() > self.scope_depth
+        {
             self.emit_opcode(OpCode::Pop);
-            self.locals.vars.pop();
+            self.context.locals.pop();
         }
     }
 
     /// Pushes a new loop onto the loop stack
     fn begin_loop(&mut self) -> usize {
-        let begin = self.chunk.code.len();
-        self.loops.push(Loop::new(self.locals.scope_depth, begin));
+        let begin = self.chunk().code.len();
+        self.loops.push(Loop::new(self.scope_depth, begin));
         begin
     }
 
@@ -730,7 +871,7 @@ impl<'a> Parser<'a> {
     fn emit_pop_for_locals(&mut self, max_depth: i32) {
         let mut count = 0;
 
-        for local in self.locals.vars.iter().rev() {
+        for local in self.context.locals.iter().rev() {
             if local.depth > max_depth {
                 count += 1;
             } else {
@@ -756,10 +897,6 @@ impl<'a> Parser<'a> {
 
     // Bytecode generation methods
     //-----------------------------------------------------
-    fn finalize_chunk(&mut self) {
-        self.emit_opcode(OpCode::Return);
-    }
-
     #[inline]
     fn emit_opcode(&mut self, opcode: OpCode) {
         self.emit_byte(opcode as u8);
@@ -767,12 +904,13 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn emit_byte(&mut self, byte: u8) {
-        self.chunk.write(byte, self.previous.line);
+        let line = self.previous.line;
+        self.chunk().write(byte, line);
     }
 
     /// Add the value to chunk's constant table and opcode for it
     fn emit_constant(&mut self, value: Value) {
-        let index = self.chunk.add_constant(value) as u32;
+        let index = self.chunk().add_constant(value) as u32;
         self.emit_with_operand(OpCode::Constant, index);
     }
 
@@ -785,12 +923,12 @@ impl<'a> Parser<'a> {
         let line = self.previous.line;
 
         if operand <= u8::MAX as u32 {
-            self.chunk.write(opcode as u8, line);
-            self.chunk.write(op_bytes[0], line);
+            self.chunk().write(opcode as u8, line);
+            self.chunk().write(op_bytes[0], line);
         } else if operand <= u16::MAX as u32 {
-            self.chunk.write(opcode as u8 | 1u8 << 7, line);
-            self.chunk.write(op_bytes[0], line);
-            self.chunk.write(op_bytes[1], line);
+            self.chunk().write(opcode as u8 | 1u8 << 7, line);
+            self.chunk().write(op_bytes[0], line);
+            self.chunk().write(op_bytes[1], line);
         } else {
             panic!("Index byte too large for OpCode (maximum is {})", u16::MAX);
         }
@@ -801,7 +939,7 @@ impl<'a> Parser<'a> {
     fn emit_loop(&mut self, loop_begin: usize) {
         self.emit_opcode(OpCode::Loop);
         // +2 to adjust for the 2-byte jump offset to be emitted
-        let jmp_offset = self.chunk.code.len() - loop_begin + 2;
+        let jmp_offset = self.chunk().code.len() - loop_begin + 2;
 
         if jmp_offset > u16::MAX as usize {
             panic!("Too much code to jump back: loop offset is too big.");
@@ -819,21 +957,21 @@ impl<'a> Parser<'a> {
         self.emit_opcode(opcode);
         self.emit_byte(0xFF);
         self.emit_byte(0xFF);
-        self.chunk.code.len() - 2
+        self.chunk().code.len() - 2
     }
 
     /// Sets the jump offset to point to the just next opcode to be emitted.
     fn patch_jump(&mut self, offset: usize) {
         // -2 to adjust for the 2-byte jump offset to be emitted
-        let jmp_offset = self.chunk.code.len() - offset - 2;
+        let jmp_offset = self.chunk().code.len() - offset - 2;
 
         if jmp_offset > u16::MAX as usize {
             panic!("Too much code to jump over: jump offset is too big.");
         }
 
         let bytes = (jmp_offset as u16).to_le_bytes();
-        self.chunk.code[offset] = bytes[0];
-        self.chunk.code[offset + 1] = bytes[1];
+        self.chunk().code[offset] = bytes[0];
+        self.chunk().code[offset + 1] = bytes[1];
     }
 
     // Token matching/processing methods
@@ -930,12 +1068,12 @@ impl<'a> Parser<'a> {
 
             // Actually every operator that is not prefix is considered infix
             TokenKind::Question => self.ternary(),
+            TokenKind::LeftParen => self.call(),
 
             // The `Equal` binary operator is handeled seperately by the
             // prefix(variable) expression parser before this function.
 
-            // This is unreachable because every other non-infix token has
-            // the lowest precedence(NONE). And this function will never be
+            // This is unreachable because this function will never be
             // entered if precedence is lower than Assingment.
             _ => unreachable!(),
         }
@@ -1005,7 +1143,7 @@ fn infix_precedence(operator: TokenKind) -> Precedence {
         Less | LessEqual | Greater | GreaterEqual => Precedence::Comparison,
         Plus | Minus => Precedence::Term,
         Star | Slash => Precedence::Factor,
-        Dot => Precedence::Call,
+        Dot | LeftParen => Precedence::Call,
         _ => Precedence::None,
     }
 }

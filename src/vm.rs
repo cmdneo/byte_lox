@@ -1,7 +1,11 @@
-use std::ops::{Add, Div, Mul, Sub};
+use std::{
+    mem::replace,
+    ops::{Add, Div, Mul, Sub},
+    ptr::null,
+};
 
 use crate::{
-    chunk::{Chunk, OpCode},
+    chunk::OpCode,
     compiler, debug,
     garbage::GarbageCollector,
     object::{Function, GcObject, ObjectKind},
@@ -13,9 +17,6 @@ use crate::{
 
 const CALL_DEPTH_MAX: usize = 256;
 const STACK_MAX: usize = 8192;
-
-// Instead of popping off the value and then pushing it back.
-// Just modify the value in place at stack top.
 
 // Instead of popping off the value and then pushing it back.
 // Just modify the value in place at stack top.
@@ -34,16 +35,16 @@ macro_rules! binary_cmp_op {
 }
 
 pub struct VM {
-    /// Currently executing chunk with bytecode and associated constants
-    chunk: Chunk,
-    /// Instruction pointer: Points to the next instruction to be executed
-    ip: usize,
     /// Stack for storing temporararies and local variables
     stack: Stack<Value, STACK_MAX>,
-    /// Call stack
-    call_stack: Stack<CallFrame, CALL_DEPTH_MAX>,
-    /// Interned strings collection table
-    strings: Table<()>,
+    /// Enclosing call frames,
+    // NOTE: The dummy call frame created is pushed as the first entry into it and
+    // is replaced with a real call frame for the top-level script which reside of
+    // an implicitly defined function when we start executing code.
+    call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
+    /// Currently active call frame.
+    /// When no code is being executed it is a dummy value.
+    frame: CallFrame,
     /// Global variables table
     globals: Table<Value>,
     /// VM's mark and sweep garbage collector
@@ -55,14 +56,41 @@ pub enum InterpretError {
     Runtime,
 }
 
-#[derive(Clone, Copy)]
 struct CallFrame {
-    /// Return address
-    ra: u32,
+    /// Store a raw pointer to avoid going through gc everytime
+    /// Always use dot to acces it's fields as Deref is impl for CallFrame for it.
+    function: *const Function,
+    /// Instruction pointer
+    ip: usize,
     /// Frame/base pointer
-    fp: u32,
-    /// The function object
-    function: GcObject,
+    fp: usize,
+}
+
+impl CallFrame {
+    fn new(function: &Function, fp: usize) -> Self {
+        Self {
+            function,
+            ip: 0,
+            fp,
+        }
+    }
+}
+
+impl Default for CallFrame {
+    fn default() -> Self {
+        Self {
+            function: null(),
+            ip: 0,
+            fp: 0,
+        }
+    }
+}
+
+impl std::ops::Deref for CallFrame {
+    type Target = Function;
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.function.as_ref().unwrap() }
+    }
 }
 
 type InterpretResult = Result<(), InterpretError>;
@@ -78,58 +106,40 @@ impl VM {
     /// Chunk must have a RETURN instruction at the end.
     pub fn new() -> Self {
         VM {
-            chunk: Chunk::default(),
-            ip: 0,
             stack: Stack::new(),
-            call_stack: Stack::new(),
-            strings: Table::new(),
+            call_frames: Stack::new(),
+            // Put a dummy frame as now no code is being executed
+            // and this simplifies stuff
+            frame: CallFrame::default(),
             globals: Table::new(),
             gc: GarbageCollector::new(),
         }
     }
 
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
-        let chunk: Chunk;
+        if let Ok(object) = compiler::compile(source, &mut self.gc) {
+            let function = if let ObjectKind::Function(fun) = &object.kind {
+                fun
+            } else {
+                panic!("Compiled object must be a function object")
+            };
 
-        if let Ok(ch) = compiler::compile(source, &mut self.gc) {
-            chunk = ch;
+            // The top-level code resides inside an implicitly defined function.
+            self.reset_stacks();
+            self.push(Value::Object(object));
+            self.call(function, 0)?;
+            self.run()
         } else {
-            return Err(InterpretError::Compile);
+            Err(InterpretError::Compile)
         }
-
-        self.reset_vm();
-        self.chunk = chunk;
-        self.run()
     }
 
-    fn reset_vm(&mut self) {
-        self.ip = 0;
+    fn reset_stacks(&mut self) {
         self.stack.clear();
-
-        // TODO cleanup
-        let name = self
-            .gc
-            .create_object(ObjectKind::from(String::from("<script>")));
-        let function = self
-            .gc
-            .create_object(ObjectKind::from(Function::named(name)));
-
-        self.call_stack.push(CallFrame {
-            ra: 0,
-            fp: 0,
-            function,
-        });
-        self.stack.push(Value::Nil);
-    }
-
-    /// Returns the currently active call frame
-    fn frame(&self) -> CallFrame {
-        self.call_stack.top().clone()
+        self.call_frames.clear();
     }
 
     fn run(&mut self) -> InterpretResult {
-        let frame = self.frame();
-
         loop {
             if cfg!(feature = "trace_execution") {
                 // Dump the stack
@@ -139,13 +149,13 @@ impl VM {
                 }
 
                 println!();
-                debug::disassemble_instruction(&self.chunk, self.ip);
+                debug::disassemble_instruction(&self.frame.chunk, self.frame.ip);
             }
 
             let byte = self.next_byte();
             let is_long = byte >> 7 == 1;
             let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
-                panic!("Unknown opcode '{byte}' at offset {}", self.ip - 1);
+                panic!("Unknown opcode '{byte}' at offset {}", self.frame.ip - 1);
             });
 
             match opcode {
@@ -173,7 +183,7 @@ impl VM {
                 OpCode::DefineGlobal => {
                     let name = self.read_object(is_long);
 
-                    self.globals.insert(name, self.stack.top().clone());
+                    self.globals.insert(name, self.peek(0));
                     // Pop it after insertion, so that GC does not remove it.
                     self.pop();
                 }
@@ -184,8 +194,7 @@ impl VM {
                     if let Some(value) = self.globals.find(name) {
                         self.push(value);
                     } else {
-                        self.error(&format!("Undefined variable '{}'.", name));
-                        return Err(InterpretError::Runtime);
+                        return self.error(&format!("Undefined variable '{}'.", name));
                     }
                 }
 
@@ -193,10 +202,9 @@ impl VM {
                     let name = self.read_object(is_long);
 
                     // If the variable name did not exist, then assigning it is illegal.
-                    if self.globals.insert(name, self.stack.top().clone()) {
+                    if self.globals.insert(name, self.peek(0)) {
                         self.globals.delete(name);
-                        self.error(&format!("Undefined variable '{}'.", name));
-                        return Err(InterpretError::Runtime);
+                        return self.error(&format!("Undefined variable '{}'.", name));
                     }
 
                     // No need to pop the value after assingment, since it is an
@@ -205,12 +213,14 @@ impl VM {
 
                 OpCode::GetLocal => {
                     let slot = self.read_operand(is_long);
+                    let slot = slot + self.frame.fp;
                     self.push(self.stack[slot]);
                 }
 
                 OpCode::SetLocal => {
                     let slot = self.read_operand(is_long);
-                    self.stack[slot] = self.stack.top().clone();
+                    let slot = slot + self.frame.fp;
+                    self.stack[slot] = self.peek(0);
                     // No need to pop the value after assingment, since it is an
                     // expression and its result is the same as its operand.
                 }
@@ -246,7 +256,7 @@ impl VM {
                 OpCode::Add => {
                     self.check_if_numbers_or_strings()?;
 
-                    if self.stack.top().clone().is_string() {
+                    if self.peek(0).is_string() {
                         let rhs = self.pop();
                         let lhs = self.pop();
                         let result = add_strings(&lhs, &rhs, &mut self.gc);
@@ -286,8 +296,7 @@ impl VM {
 
                 OpCode::Assert => {
                     if !self.pop().truthiness() {
-                        self.error("Assertion failed.");
-                        return Err(InterpretError::Runtime);
+                        return self.error("Assertion failed.");
                     }
                 }
 
@@ -295,28 +304,39 @@ impl VM {
                 OpCode::JumpIfFalse => {
                     let offset = self.read_operand(true);
                     if !self.stack.top().truthiness() {
-                        self.ip += offset;
+                        self.frame.ip += offset;
                     }
                 }
 
                 OpCode::JumpIfTrue => {
                     let offset = self.read_operand(true);
                     if self.stack.top().truthiness() {
-                        self.ip += offset;
+                        self.frame.ip += offset;
                     }
                 }
 
                 OpCode::Jump => {
                     let offset = self.read_operand(true);
-                    self.ip += offset;
+                    self.frame.ip += offset;
                 }
 
                 OpCode::Loop => {
                     let offset = self.read_operand(true);
-                    self.ip -= offset;
+                    self.frame.ip -= offset;
+                }
+
+                // Function call arguments are passed via stack.
+                // The slot zero of the function's stack frame is occupied
+                // by the function object being called itself.
+                // So the arguments start from slot one.
+                OpCode::Call => {
+                    let arg_count = self.read_operand(is_long);
+                    // The function object is before the arguments on stack
+                    self.call_value(self.peek(arg_count), arg_count)?;
                 }
 
                 OpCode::Return => {
+                    // Discard chunk on return
                     return Ok(());
                 }
             }
@@ -325,53 +345,111 @@ impl VM {
 
     // Error reporting and recovery methods
     //-----------------------------------------------------
-    fn error(&self, message: &str) {
-        // Interpreter has already consumed the instruction, so back by 1.
-        let line = self.chunk.get_line(self.ip - 1);
+    /// Print the error message along with stack trace and reset the stacks
+    fn error(&mut self, message: &str) -> InterpretResult {
+        let print_frame = |frame: &CallFrame, distance: usize| {
+            // Interpreter has already consumed the instruction, so back by 1.
+            let line = frame.chunk.get_line(frame.ip - 1);
+            let name = frame.name.to_string();
+            if name == "<script>" {
+                eprintln!("{distance:5}: [line {}] in {}", line, name);
+            } else {
+                eprintln!("{distance:5}: [line {}] in {}()", line, name);
+            }
+        };
+
         eprintln!("{message}");
-        eprintln!("[line {line}] in script");
+
+        print_frame(&self.frame, 0); // The current frame
+
+        // The rest of the call stack. 0 is the dummy frame, do not print it.
+        for (d, i) in (1..self.call_frames.len()).rev().enumerate() {
+            print_frame(&self.call_frames[i], d + 1);
+        }
+
+        self.frame = CallFrame::default();
+        self.reset_stacks();
+        Err(InterpretError::Runtime)
     }
 
     // Helper methods
     //-----------------------------------------------------
+    /// Calls the value if it is a function or class object
+    fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
+        if let Value::Object(object) = callee {
+            match &object.kind {
+                ObjectKind::Function(fun) => self.call(&fun, arg_count),
+                _ => self.error("Can only call functions and classes."),
+            }
+        } else {
+            self.error("Can only call functions and classes")
+        }
+    }
+
+    fn call(&mut self, function: &Function, arg_count: usize) -> InterpretResult {
+        // Last opcode must be RETURN, otherwise it will cause UB(out-of-bounds)
+        assert!(function.chunk.code.last().unwrap().clone() == OpCode::Return as u8);
+
+        if function.arity as usize != arg_count {
+            return self.error(&format!(
+                "Expected {} arguments but got {} arguments.",
+                function.arity, arg_count
+            ));
+        }
+
+        if self.call_frames.len() == self.call_frames.cap() {
+            return self.error(&format!(
+                "Max call depth reached, {}.",
+                self.call_frames.cap()
+            ));
+        }
+
+        self.call_frames.push(replace(
+            &mut self.frame,
+            // The arguments plus the function object (in slot zero of frame)
+            CallFrame::new(function, self.stack.len() - arg_count - 1),
+        ));
+
+        Ok(())
+    }
+
     #[inline]
-    fn check_if_number(&self) -> InterpretResult {
+    fn check_if_number(&mut self) -> InterpretResult {
         if self.stack.top().is_number() {
             Ok(())
         } else {
-            self.error("Operand must be a number.");
-            Err(InterpretError::Runtime)
+            self.error("Operand must be a number.")
         }
     }
 
     #[inline]
-    fn check_if_numbers(&self) -> InterpretResult {
+    fn check_if_numbers(&mut self) -> InterpretResult {
         let (x, y) = (self.peek(0), self.peek(1));
 
         if x.is_number() && y.is_number() {
             Ok(())
         } else {
-            self.error("Both operands must be numbers.");
-            Err(InterpretError::Runtime)
+            self.error("Both operands must be numbers.")
         }
     }
 
     #[inline]
-    fn check_if_numbers_or_strings(&self) -> InterpretResult {
+    fn check_if_numbers_or_strings(&mut self) -> InterpretResult {
         let (x, y) = (self.peek(0), self.peek(1));
 
-        if (x.is_string() && y.is_string()) || (y.is_number() && y.is_number()) {
+        if (x.is_string() && y.is_string()) || (x.is_number() && y.is_number()) {
             Ok(())
         } else {
-            self.error("Operands must be either both numbers or both strings.");
-            Err(InterpretError::Runtime)
+            self.error("Operands must be either both numbers or both strings.")
         }
     }
 
     #[inline]
     fn next_byte(&mut self) -> u8 {
-        let ret = self.chunk.code[self.ip];
-        self.ip += 1;
+        // The last opcode in a chunk is guranteed & checked to be RETURN
+        // which causes the currently executing chunk to be discarded.
+        let ret = unsafe { self.frame.chunk.code.get_unchecked(self.frame.ip).clone() };
+        self.frame.ip += 1;
         ret
     }
 
@@ -385,7 +463,7 @@ impl VM {
 
     fn read_constant(&mut self, is_long: bool) -> Value {
         let index = self.read_operand(is_long);
-        self.chunk.constants[index]
+        self.frame.chunk.constants[index]
     }
 
     #[inline]
