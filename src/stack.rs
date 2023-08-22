@@ -52,6 +52,10 @@ impl<T, const CAP: usize> Stack<T, CAP> {
         self.sp
     }
 
+    pub fn cap(&self) -> usize {
+        CAP
+    }
+
     pub fn set_len(&mut self, new_len: usize) {
         for i in (new_len..self.sp).rev() {
             // Everything before self.sp is initialized
