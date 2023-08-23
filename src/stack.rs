@@ -48,6 +48,16 @@ impl<T, const CAP: usize> Stack<T, CAP> {
         }
     }
 
+    /// Returns a slice of stack
+    pub fn window(&mut self, start: usize, end: usize) -> &[T] {
+        if end > self.sp {
+            panic!("Invalid range for slicing the stack.");
+        }
+
+        // Everything before self.sp is initialized, and range is left inclusive only
+        unsafe { std::mem::transmute::<&[MaybeUninit<T>], &[T]>(&self.array[start..end]) }
+    }
+
     pub fn len(&self) -> usize {
         self.sp
     }

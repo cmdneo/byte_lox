@@ -5,6 +5,7 @@ pub(crate) mod compiler;
 pub(crate) mod debug;
 pub(crate) mod garbage;
 pub(crate) mod locals;
+pub(crate) mod native;
 pub(crate) mod object;
 pub(crate) mod parser;
 pub(crate) mod scanner;

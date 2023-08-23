@@ -8,7 +8,8 @@ use crate::{
     chunk::OpCode,
     compiler, debug,
     garbage::GarbageCollector,
-    object::{Function, GcObject, ObjectKind},
+    native,
+    object::{Function, GcObject, Native, ObjectKind},
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -105,7 +106,7 @@ impl VM {
     /// Creates a new VM.
     /// Chunk must have a RETURN instruction at the end.
     pub fn new() -> Self {
-        VM {
+        let mut ret = Self {
             stack: Stack::new(),
             call_frames: Stack::new(),
             // Put a dummy frame as now no code is being executed
@@ -113,7 +114,10 @@ impl VM {
             frame: CallFrame::default(),
             globals: Table::new(),
             gc: GarbageCollector::new(),
-        }
+        };
+
+        ret.define_native();
+        ret
     }
 
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
@@ -126,7 +130,7 @@ impl VM {
 
             // The top-level code resides inside an implicitly defined function.
             self.reset_stacks();
-            self.push(Value::Object(object));
+            self.push(object.into());
             self.call(function, 0)?;
             self.run()
         } else {
@@ -390,6 +394,7 @@ impl VM {
         if let Value::Object(object) = callee {
             match &object.kind {
                 ObjectKind::Function(fun) => self.call(&fun, arg_count),
+                ObjectKind::Native(fun) => self.call_native(fun, arg_count),
                 _ => self.error("Can only call functions and classes."),
             }
         } else {
@@ -424,6 +429,56 @@ impl VM {
         Ok(())
     }
 
+    fn call_native(&mut self, native: &Native, arg_count: usize) -> InterpretResult {
+        if native.arity as usize != arg_count {
+            return self.error(&format!(
+                "Expected {} arguments but got {} arguments.",
+                native.arity, arg_count
+            ));
+        }
+
+        let len = self.stack.len();
+        let args = self.stack.window(len - arg_count, len);
+
+        let ret_value = match (native.function)(&mut self.gc, args) {
+            Ok(value) => value,
+            Err(msg) => {
+                return self.error(&format!(
+                    "Error in native function '{}': {}",
+                    native.name, msg
+                ))
+            }
+        };
+
+        // Remove the arguments and the function object
+        self.stack.set_len(self.stack.len() - arg_count - 1);
+        self.push(ret_value);
+
+        Ok(())
+    }
+
+    fn define_native(&mut self) {
+        for (name, function, arity) in native::NATIVE_FUNCTIONS {
+            // Push values immediately to avoid GC removing them
+            let name = self.gc.intern_string(name.to_string());
+            self.push(Value::Object(name));
+
+            let function = self.gc.create_object(ObjectKind::Native(Native {
+                name,
+                function,
+                arity,
+            }));
+            self.push(Value::Object(function));
+
+            self.globals.insert(name, Value::Object(function));
+
+            self.pop();
+            self.pop();
+        }
+    }
+
+    // Helper functions
+    //-----------------------------------------------------
     #[inline]
     fn check_if_number(&mut self) -> InterpretResult {
         if self.stack.top().is_number() {

@@ -5,7 +5,7 @@ use std::{
     ptr::null_mut,
 };
 
-use crate::{chunk::Chunk, strings::hash_string};
+use crate::{chunk::Chunk, native::NativeFunction, strings::hash_string, value::Value};
 
 /// Heap allocated Lox Objects, with mark and sweep garbage collection.
 /// The actual object is stored as a pointer, it's allocation and deallocation
@@ -43,12 +43,23 @@ pub enum ObjectKind {
     Instance,
     Class,
     Function(Function),
+    Native(Native),
     Invalid,
 }
 
+// Lox dynamically allocated object types
+//-----------------------------------------------
+/// Lox function object
 pub struct Function {
     pub name: GcObject,
     pub chunk: Chunk,
+    pub arity: u32,
+}
+
+/// Native functions object, for calling built-in functions
+pub struct Native {
+    pub name: GcObject,
+    pub function: NativeFunction,
     pub arity: u32,
 }
 
@@ -86,6 +97,7 @@ impl fmt::Display for ObjectKind {
             Self::Instance => write!(f, "<instance of !>"),
             Self::Class => write!(f, "<class !>"),
             Self::Function(fun) => write!(f, "<fn {}>", fun.name),
+            Self::Native(fun) => write!(f, "<native fn {}>", fun.name),
             Self::Invalid => unreachable!(),
         }
     }
@@ -131,6 +143,12 @@ impl GcObject {
 impl Default for GcObject {
     fn default() -> Self {
         Self { object: null_mut() }
+    }
+}
+
+impl Into<Value> for GcObject {
+    fn into(self) -> Value {
+        Value::Object(self)
     }
 }
 
