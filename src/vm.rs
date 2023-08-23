@@ -58,8 +58,10 @@ pub enum InterpretError {
 }
 
 struct CallFrame {
-    /// Store a raw pointer to avoid going through gc everytime
-    /// Always use dot to acces it's fields as Deref is impl for CallFrame for it.
+    // Store a raw pointer to avoid going through GcObject everytime
+    // and using a reference causes lifetime issues.
+    /// The associated function object.
+    /// Always use dot(Deref is implemented) to access it's fields.
     function: *const Function,
     /// Instruction pointer
     ip: usize,
@@ -90,6 +92,8 @@ impl Default for CallFrame {
 impl std::ops::Deref for CallFrame {
     type Target = Function;
     fn deref(&self) -> &Self::Target {
+        // The function object resides on the value stack
+        // as long as the call frame is active. So it is safe.
         unsafe { self.function.as_ref().unwrap() }
     }
 }

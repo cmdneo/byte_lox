@@ -40,21 +40,17 @@ impl<T, const CAP: usize> Stack<T, CAP> {
         unsafe { self.array[self.sp - 1].assume_init_ref() }
     }
 
-    pub fn iter(&self) -> StackIter<'_, T> {
-        StackIter {
-            ref_array: &self.array,
-            current: 0,
-            end: self.sp,
-        }
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.window(0, self.sp).iter()
     }
 
     /// Returns a slice of stack
-    pub fn window(&mut self, start: usize, end: usize) -> &[T] {
+    pub fn window(&self, start: usize, end: usize) -> &[T] {
         if end > self.sp {
             panic!("Invalid range for slicing the stack.");
         }
 
-        // Everything before self.sp is initialized, and range is left inclusive only
+        // Everything before self.sp is initialized, and range is left inclusive only.
         unsafe { std::mem::transmute::<&[MaybeUninit<T>], &[T]>(&self.array[start..end]) }
     }
 
@@ -109,26 +105,5 @@ impl<T, const CAP: usize> IndexMut<usize> for Stack<T, CAP> {
 
         // self.sp is guranteed by self.push to be not greater than CAP
         unsafe { self.array[index].assume_init_mut() }
-    }
-}
-
-pub struct StackIter<'a, T> {
-    ref_array: &'a [MaybeUninit<T>],
-    current: usize,
-    end: usize,
-}
-
-impl<'a, T> Iterator for StackIter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // `self.end` is set to `self.sp` when making the iterator, so
-        // values only before `self.end` are initialized and valid.
-        if self.current == self.end {
-            None
-        } else {
-            self.current += 1;
-            Some(unsafe { self.ref_array[self.current - 1].assume_init_ref() })
-        }
     }
 }
