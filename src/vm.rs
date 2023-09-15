@@ -1,3 +1,9 @@
+//! The bytecode virtual machine which executes bytecode.
+//! The VM needs to be fast which nesseciates the use of some unsafe code,
+//! we mainly remove some runtime checks where it is guranteed by the lox compiler
+//! that a certian condition is satisfied.
+//! We do verify some preconditions in debug build using [`debug_assert!`].
+
 use std::{
     mem::replace,
     ops::{Add, Div, Mul, Sub},
@@ -39,13 +45,13 @@ pub struct VM {
     /// Stack for storing temporararies and local variables
     stack: Stack<Value, STACK_MAX>,
     /// Enclosing call frames,
-    // NOTE: The dummy call frame created is pushed as the first entry into it and
-    // is replaced with a real call frame for the top-level script which reside of
-    // an implicitly defined function when we start executing code.
+    // NOTE: The dummy call frame which was created is pushed as the first
+    // entry into it when we start executing code, so it should be ignored.
     call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
     /// Currently active call frame.
     /// When no code is being executed it is a dummy value.
     frame: CallFrame,
+    ip: *const u8,
     /// Global variables table
     globals: Table<Value>,
     /// VM's mark and sweep garbage collector
@@ -58,24 +64,18 @@ pub enum InterpretError {
 }
 
 struct CallFrame {
-    // Store a raw pointer to avoid going through GcObject everytime
-    // and using a reference causes lifetime issues.
-    /// The associated function object.
+    // Store a raw pointers, they are fast.
     /// Always use dot(Deref is implemented) to access it's fields.
     function: *const Function,
     /// Instruction pointer
-    ip: usize,
+    ip: *const u8,
     /// Frame/base pointer
     fp: usize,
 }
 
 impl CallFrame {
-    fn new(function: &Function, fp: usize) -> Self {
-        Self {
-            function,
-            ip: 0,
-            fp,
-        }
+    fn new(function: &Function, ip: *const u8, fp: usize) -> Self {
+        Self { function, ip, fp }
     }
 }
 
@@ -83,7 +83,7 @@ impl Default for CallFrame {
     fn default() -> Self {
         Self {
             function: null(),
-            ip: 0,
+            ip: null(),
             fp: 0,
         }
     }
@@ -113,8 +113,8 @@ impl VM {
         let mut ret = Self {
             stack: Stack::new(),
             call_frames: Stack::new(),
+            ip: null(),
             // Put a dummy frame as now no code is being executed
-            // and this simplifies stuff
             frame: CallFrame::default(),
             globals: Table::new(),
             gc: GarbageCollector::new(),
@@ -135,7 +135,7 @@ impl VM {
             // The top-level code resides inside an implicitly defined function.
             self.reset_stacks();
             self.push(object.into());
-            self.call(function, 0)?;
+            self.call_function(function, 0)?;
             self.run()
         } else {
             Err(InterpretError::Compile)
@@ -156,17 +156,23 @@ impl VM {
                     print!("[ {value} ]");
                 }
 
+                let offset = unsafe {
+                    self.frame
+                        .ip
+                        .offset_from(self.frame.function.read().chunk.code.as_ptr())
+                } as usize;
                 println!();
-                debug::disassemble_instruction(&self.frame.chunk, self.frame.ip);
+                debug::disassemble_instruction(&self.frame.chunk, offset);
             }
 
             let byte = self.next_byte();
+            // MSB=1 indicates a long operand
             let is_long = byte >> 7 == 1;
+            let byte = byte & !(1 << 7);
+
             // All bytes generated are valid opcode
-            // let opcode = unsafe { std::mem::transmute::<u8, OpCode>(byte) };
-            let opcode = OpCode::try_from(byte).unwrap_or_else(|()| {
-                panic!("Unknown opcode '{byte}' at offset {}", self.frame.ip - 1);
-            });
+            debug_assert!(OpCode::try_from(byte).is_ok());
+            let opcode = unsafe { std::mem::transmute::<u8, OpCode>(byte) };
 
             match opcode {
                 OpCode::Constant => {
@@ -314,25 +320,25 @@ impl VM {
                 OpCode::JumpIfFalse => {
                     let offset = self.read_operand(true);
                     if !self.stack.top().truthiness() {
-                        self.frame.ip += offset;
+                        self.frame.ip = unsafe { self.frame.ip.add(offset) };
                     }
                 }
 
                 OpCode::JumpIfTrue => {
                     let offset = self.read_operand(true);
                     if self.stack.top().truthiness() {
-                        self.frame.ip += offset;
+                        self.frame.ip = unsafe { self.frame.ip.add(offset) };
                     }
                 }
 
                 OpCode::Jump => {
                     let offset = self.read_operand(true);
-                    self.frame.ip += offset;
+                    self.frame.ip = unsafe { self.frame.ip.add(offset) };
                 }
 
                 OpCode::Loop => {
                     let offset = self.read_operand(true);
-                    self.frame.ip -= offset;
+                    self.frame.ip = unsafe { self.frame.ip.sub(offset) };
                 }
 
                 // Function call arguments are passed via stack.
@@ -368,8 +374,14 @@ impl VM {
     fn error(&mut self, message: &str) -> InterpretResult {
         let print_frame = |frame: &CallFrame, distance: usize| {
             // Interpreter has already consumed the instruction, so back by 1.
-            let line = frame.chunk.get_line(frame.ip - 1);
+            let byte_index = unsafe {
+                frame
+                    .ip
+                    .offset_from(frame.function.read().chunk.code.as_ptr())
+            } as usize;
+            let line = frame.chunk.get_line(byte_index - 1);
             let name = frame.name.to_string();
+
             if name == "<script>" {
                 eprintln!("{distance:5}: [line {}] in {}", line, name);
             } else {
@@ -397,7 +409,7 @@ impl VM {
     fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
         if let Value::Object(object) = callee {
             match &object.kind {
-                ObjectKind::Function(fun) => self.call(&fun, arg_count),
+                ObjectKind::Function(fun) => self.call_function(&fun, arg_count),
                 ObjectKind::Native(fun) => self.call_native(fun, arg_count),
                 _ => self.error("Can only call functions and classes."),
             }
@@ -406,9 +418,12 @@ impl VM {
         }
     }
 
-    fn call(&mut self, function: &Function, arg_count: usize) -> InterpretResult {
+    fn call_function(&mut self, function: &Function, arg_count: usize) -> InterpretResult {
         // Last opcode must be RETURN, otherwise it will cause UB(out-of-bounds)
-        assert!(function.chunk.code.last().unwrap().clone() == OpCode::Return as u8);
+        debug_assert!(
+            function.chunk.code.last().unwrap().clone() == OpCode::Return as u8,
+            "Last opcode of a chunk must be RETURN"
+        );
 
         if function.arity as usize != arg_count {
             return self.error(&format!(
@@ -420,14 +435,18 @@ impl VM {
         if self.call_frames.len() == self.call_frames.cap() {
             return self.error(&format!(
                 "Max call depth reached, {}.",
-                self.call_frames.cap()
+                self.call_frames.cap() - 1 // Exclude the top-level function
             ));
         }
 
         self.call_frames.push(replace(
             &mut self.frame,
             // The arguments plus the function object (in slot zero of frame)
-            CallFrame::new(function, self.stack.len() - arg_count - 1),
+            CallFrame::new(
+                function,
+                function.chunk.code.as_ptr(),
+                self.stack.len() - arg_count - 1,
+            ),
         ));
 
         Ok(())
@@ -518,8 +537,9 @@ impl VM {
     fn next_byte(&mut self) -> u8 {
         // The last opcode in a chunk is guranteed & checked to be RETURN
         // which causes the currently executing chunk to be discarded.
-        let ret = unsafe { self.frame.chunk.code.get_unchecked(self.frame.ip).clone() };
-        self.frame.ip += 1;
+        // let ret = unsafe { self.frame.chunk.code.get_unchecked(self.frame.ip).clone() };
+        let ret = unsafe { self.frame.ip.read() };
+        self.frame.ip = unsafe { self.frame.ip.add(1) };
         ret
     }
 
