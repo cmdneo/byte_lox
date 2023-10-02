@@ -1,8 +1,12 @@
-use crate::chunk::{Chunk, OpCode};
+use crate::{
+    chunk::{Chunk, OpCode},
+    object::ObjectKind,
+    value::Value,
+};
 
 /// Disassembles an instruction at the `offset` and pretty prints it.
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
-    print!("{:04} ", offset);
+    print!("{offset:04} ");
 
     // If the current line is same as the previous then do not re-print it.
     if offset > 0 && chunk.get_line(offset) == chunk.get_line(offset - 1) {
@@ -31,6 +35,8 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         SetGlobal => constant("SET_GLOBAL", chunk, offset),
         GetLocal => operand("GET_LOCAL", chunk, offset),
         SetLocal => operand("SET_LOCAL", chunk, offset),
+        GetUpvalue => operand("GET_UPVALUE", chunk, offset),
+        SetUpvalue => operand("SET_UPVALUE", chunk, offset),
 
         Equal => simple("EQUAL", offset),
         NotEqual => simple("NOT_EQUAL", offset),
@@ -54,6 +60,37 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         Jump => jump_instruction("JUMP", chunk, offset, 1),
         Loop => jump_instruction("LOOP", chunk, offset, -1),
         Call => operand("CALL", chunk, offset),
+
+        Closure => {
+            constant("CLOSURE", chunk, offset);
+            let (operand, offset) = read_operand(chunk, offset);
+
+            let upvalue_count = if let Value::Object(obj) = chunk.constants[operand] {
+                if let ObjectKind::Function(fun) = &obj.kind {
+                    fun.upvalue_count as usize
+                } else {
+                    panic!("Closure operand must refer to a function object.")
+                }
+            } else {
+                panic!("Closure operand must refer to a function object.")
+            };
+
+            let mut offset = offset;
+            for _ in 0..upvalue_count {
+                let captured_type = if chunk.code[offset] == 1 {
+                    "local"
+                } else {
+                    "upvalue"
+                };
+                let index = u16::from_le_bytes([chunk.code[offset + 1], chunk.code[offset + 2]]);
+
+                println!("{offset:04}      | {:20} {captured_type:8} {index:4}", "");
+                offset += 3;
+            }
+
+            offset
+        }
+        CloseUpvalue => simple("CLOSE_UPVALUE", offset),
 
         Return => simple("RETURN", offset),
     }
@@ -114,10 +151,8 @@ fn read_operand(chunk: &Chunk, offset: usize) -> (usize, usize) {
 
     if is_long {
         // Long constant has 2-bytes operand
-        let bytes = &chunk.code[offset + 1..offset + 3];
-        let bytes = [bytes[0], bytes[1], 0, 0];
-
-        let operand = u32::from_le_bytes(bytes);
+        let bytes = [chunk.code[offset + 1], chunk.code[offset + 2]];
+        let operand = u16::from_le_bytes(bytes);
         (operand as usize, offset + 3)
     } else {
         // Normal constants have 1-byte operand

@@ -11,7 +11,7 @@ use crate::value::Value;
 /// But if the MSB is 1 then they use a 2-byte operand.
 /// Exception: Jump opcodes always use a 2-byte operand
 ///
-/// All multibyte operands are stored in little-endian format.
+/// All multibyte operands/values are stored in little-endian format.
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum OpCode {
@@ -37,6 +37,10 @@ pub enum OpCode {
     GetLocal,
     /// Set a local
     SetLocal,
+    /// Get an upvalue
+    GetUpvalue,
+    /// Set an upvalue
+    SetUpvalue,
 
     // Equality operators, work on all types
     Equal,
@@ -63,7 +67,7 @@ pub enum OpCode {
     Print,
     Assert,
 
-    // Jumps always use a 2-byte unsigned operand for the jump offset.
+    // Jumps(and Loop) always use a 2-byte unsigned operand for the jump offset.
     /// Conditonal jump based on value on top of the stack.
     JumpIfFalse,
     /// Conditonal jump based on value on top of the stack.
@@ -72,10 +76,22 @@ pub enum OpCode {
     Jump,
     /// Unconditional backward jump
     Loop,
-    /// Call a procedure
+    /// Call a value currently on top of the stack.
+    /// Its operand contains the number of arguments being passed.
     Call,
 
-    /// Return from a procedure
+    /// Creates a closure object by wrapping a function referenced by its
+    /// operand which is a constant-table index.
+    /// After it's operand it stores a vector of whose length is equal to the
+    /// number of upvalues the function it references has.
+    /// Vector elements are of 3-bytes each:
+    /// - is_local      \[1-byte]
+    /// - upvalue_index \[2-bytes]
+    Closure,
+    /// Converts an open upvalue to closed upvalue
+    CloseUpvalue,
+
+    /// Return from a procedure.
     Return,
     // Keeep this Return opcode at last!
 }
