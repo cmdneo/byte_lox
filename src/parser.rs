@@ -62,12 +62,18 @@ impl Upvalue {
     }
 }
 
+/// A context is used for parsing and generating code for function bodies
+/// seperately, each function has a context associated with it while it is being parsed.
+/// This technique simplifies parsing functions(even nested ones).
+/// The top-level code is also represented by an implicit function.
 struct Context {
     /// Global identifiers to chunk's constant index table to
     /// avoid duplicating identifiers whenever they are encountered.
     ident_index_table: Table<u32>,
     /// The associated function object
     function: Function,
+    // Current scope depth
+    scope_depth: i16,
     /// For resolving and tracking local variables
     locals: Vec<Local>,
     /// Tracks free variables for closure support
@@ -75,10 +81,11 @@ struct Context {
 }
 
 impl Context {
-    fn new(name: GcObject) -> Self {
+    fn new(name: GcObject, scope_depth: i16) -> Self {
         Self {
             ident_index_table: Table::new(),
             function: Function::named(name),
+            scope_depth,
             // Rarely we have more than 8 local variables
             locals: Vec::with_capacity(8),
             upvalues: Vec::new(),
@@ -112,10 +119,6 @@ pub struct Parser<'a> {
     source: &'a str,
     /// Contexts, last context is the innermost context
     contexts: Vec<Context>,
-    /// Current context, inside which we are generating code
-    // context: Context,
-    // Current scope depth
-    scope_depth: i16,
     /// Loop info for creating jump opcodes for `break` and `continue`
     loops: Vec<Loop>,
     /// For allocating objects generated during compilation to bytecode
@@ -162,9 +165,6 @@ impl<'a> Parser<'a> {
             scanner: Scanner::new(source),
             source,
             contexts: Vec::with_capacity(4),
-            // Put a dummy context, it is never used but simplifies stuff.
-            // context: Context::new(GcObject::default()),
-            scope_depth: 0,
             loops: Vec::with_capacity(4),
             gc,
             had_error: RefCell::new(false),
@@ -199,7 +199,8 @@ impl<'a> Parser<'a> {
     // Parsing Context management
     /// Push a new parsing context
     fn push_context(&mut self, name: GcObject) {
-        self.contexts.push(Context::new(name));
+        let last_depth = self.contexts.last().map_or(0, |ctx| ctx.scope_depth);
+        self.contexts.push(Context::new(name, last_depth));
 
         // Slot zero of every function's stack frame is reserved for internal use.
         self.context()
@@ -209,6 +210,7 @@ impl<'a> Parser<'a> {
 
     /// Pop the current parsing context and return the generated function object
     fn pop_context(&mut self, arity: u32) -> Context {
+        self.emit_opcode(OpCode::Nil);
         self.emit_opcode(OpCode::Return);
 
         if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
@@ -227,16 +229,20 @@ impl<'a> Parser<'a> {
         self.contexts.pop().unwrap()
     }
 
+    /// Returns the an immutable reference to the currently active context.
     #[inline]
     fn context_const(&self) -> &Context {
         self.contexts.last().unwrap()
     }
 
+    /// Returns a mutable reference to the currently active context.
     #[inline]
     fn context(&mut self) -> &mut Context {
         self.contexts.last_mut().unwrap()
     }
 
+    /// Returns a mutable reference to the chunk associated with the
+    /// currently active context.
     #[inline(always)]
     fn chunk(&mut self) -> &mut Chunk {
         &mut self.context().function.chunk
@@ -370,14 +376,15 @@ impl<'a> Parser<'a> {
         } else {
             self.expression()?;
             self.consume(TokenKind::Semicolon, "Expect ';' after return value.")?;
-            self.emit_opcode(OpCode::Return)
+            self.emit_opcode(OpCode::Return);
         }
 
         Ok(())
     }
 
     // NOTE: In control flow statements the condition value needs to be explicitly
-    // popped off the stack.
+    // popped off the stack for each branch.
+
     fn if_statement(&mut self) -> ParseResult {
         // For popping the condition value we emit POP opcodes once in the
         // if's body and once in the else's body. So, even if the user does not
@@ -430,7 +437,9 @@ impl<'a> Parser<'a> {
         self.patch_jump(exit_jump);
         self.emit_opcode(OpCode::Pop); // Pop condition
 
-        // This patches jumps for break statements inside the loop
+        // This patches jumps for break statements inside the loop.
+        // Since break is inside the loop, which means that condition has already
+        // been popped, so we place it after the pop condion(above).
         self.end_loop_and_patch();
 
         Ok(())
@@ -493,6 +502,8 @@ impl<'a> Parser<'a> {
         self.emit_opcode(OpCode::Pop); // Pop condition
 
         // This patches jumps for break statements inside the loop.
+        // Since break is inside the loop, which means that condition has already
+        // been popped, so we place it after the pop condion(above).
         self.end_loop_and_patch();
 
         self.end_scope();
@@ -731,7 +742,10 @@ impl<'a> Parser<'a> {
         self.consume(TokenKind::LeftBrace, "Expect '{' before function body.")?;
         self.block()?;
 
-        self.end_scope();
+        // Here we do not need to call end_scope(), because when we pop the context
+        // everything is restored to the enclosing context.
+        // And for the interpreter, it discards its entire stack frame, so all locals
+        // belonging to it are popped off at once.
         let Context {
             function, upvalues, ..
         } = self.pop_context(arity);
@@ -809,14 +823,15 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Consumes the variable name and stores it if necessary(it is for globals).
+    /// Consumes the variable name and stores it.
+    /// Globals(dynamically bound) and locals(statically bound) are stored differently.
     fn parse_new_variable(&mut self, message: &str) -> Result<u32, ()> {
         self.consume(TokenKind::Identifier, message)?;
         self.declare_variable();
 
         // Local variables are resovled at compile time, so there is no need to
         // store their names for the runtime.
-        if self.scope_depth > 0 {
+        if self.context().scope_depth > 0 {
             return Ok(0);
         }
 
@@ -831,16 +846,17 @@ impl<'a> Parser<'a> {
     //-----------------------------------------------------
     fn declare_variable(&mut self) {
         // Global variables are late bound so we don't care about them here.
-        if self.scope_depth == 0 {
+        if self.context().scope_depth == 0 {
             return;
         }
 
         let name = self.previous;
+        let scope_depth = self.context().scope_depth;
 
         // Check if the local variable with the same name exists in the
         // current local scope, if it exists then it is an error to do so.
         for local in self.context_const().locals.iter().rev() {
-            if local.depth != -1 && local.depth < self.scope_depth {
+            if local.depth != -1 && local.depth < scope_depth {
                 break;
             }
 
@@ -857,7 +873,7 @@ impl<'a> Parser<'a> {
     fn define_variable(&mut self, name_index: u32) {
         // Local variables are stored on the stack decided at compile time.
         // We not need any extra code to create a local variable at runtime.
-        if self.scope_depth > 0 {
+        if self.context().scope_depth > 0 {
             self.mark_initialized();
             return;
         }
@@ -933,41 +949,29 @@ impl<'a> Parser<'a> {
     /// if currently not in global scope.
     #[inline]
     fn mark_initialized(&mut self) {
-        if self.scope_depth == 0 {
+        if self.context().scope_depth == 0 {
             return;
         }
-        let depth = self.scope_depth;
+        let depth = self.context().scope_depth;
         self.context().locals.last_mut().unwrap().depth = depth;
     }
 
     #[inline]
     fn begin_scope(&mut self) {
-        self.scope_depth += 1;
+        self.context().scope_depth += 1;
     }
 
+    // Ends the current scope and emits code for popping off the local variables in it.
     fn end_scope(&mut self) {
-        self.scope_depth -= 1;
+        self.context().scope_depth -= 1;
 
-        // Pop all the local variables in the scope
-        let opcodes: Vec<OpCode> = self
-            .context_const()
-            .locals
-            .iter()
-            .rev()
-            .map_while(|var| {
-                if var.depth > self.scope_depth {
-                    if var.is_captured {
-                        Some(OpCode::CloseUpValue)
-                    } else {
-                        Some(OpCode::Pop)
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let Context {
+            scope_depth,
+            locals,
+            ..
+        } = self.context_const();
 
-        for opcode in opcodes {
+        for opcode in make_pop_for_locals(&locals, *scope_depth) {
             self.emit_opcode(opcode);
             self.context().locals.pop();
         }
@@ -976,7 +980,9 @@ impl<'a> Parser<'a> {
     /// Pushes a new loop onto the loop stack
     fn begin_loop(&mut self) -> usize {
         let begin = self.chunk().code.len();
-        self.loops.push(Loop::new(self.scope_depth, begin));
+        let scope_depth = self.context().scope_depth;
+
+        self.loops.push(Loop::new(scope_depth, begin));
         begin
     }
 
@@ -992,21 +998,9 @@ impl<'a> Parser<'a> {
 
     /// Emit POP for all the locals whose depth is greater than `max_depth`.
     /// NOTE: It does not remove the locals from `context().locals`.
-    // It handles upvalue captures correctly since only the last instacne
-    // of a variable if captures.
-    fn emit_pop_for_locals(&mut self, max_depth: i16) {
-        let mut count = 0;
-
-        for local in self.context_const().locals.iter().rev() {
-            if local.depth > max_depth {
-                count += 1;
-            } else {
-                break;
-            }
-        }
-
-        for _ in 0..count {
-            self.emit_opcode(OpCode::Pop);
+    fn emit_pop_for_locals(&mut self, after_depth: i16) {
+        for opcode in make_pop_for_locals(&self.context_const().locals, after_depth) {
+            self.emit_opcode(opcode);
         }
     }
 
@@ -1272,6 +1266,27 @@ fn infix_precedence(operator: TokenKind) -> Precedence {
         Dot | LeftParen => Precedence::Call,
         _ => Precedence::None,
     }
+}
+
+/// Generates opcodes for popping locals which nest deeper than `after_depth`
+/// depending upon, whether they were captured as upvalues or not.
+/// Locals should be sorted in ascending order of depth.
+fn make_pop_for_locals(locals: &[Local], after_depth: i16) -> Vec<OpCode> {
+    locals
+        .iter()
+        .rev()
+        .map_while(|var| {
+            if var.depth > after_depth {
+                if var.is_captured {
+                    Some(OpCode::CloseUpvalue)
+                } else {
+                    Some(OpCode::Pop)
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn identifier_type(ident: &str) -> TokenKind {
