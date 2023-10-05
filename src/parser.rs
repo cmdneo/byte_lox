@@ -893,14 +893,13 @@ impl<'a> Parser<'a> {
         // add it to it, otherwise use the found constant.
         // Doing so avoids adding an identifier to the chunks's constants table every
         // time it is encountered instead we just reuse the old entry.
-        self.context_const()
-            .ident_index_table
-            .find(ident)
-            .unwrap_or_else(|| {
-                let index = self.chunk().add_constant(Value::Object(ident)) as u32;
-                self.context().ident_index_table.insert(ident, index);
-                index
-            })
+        if let Some(&index) = self.context_const().ident_index_table.find(ident) {
+            index
+        } else {
+            let index = self.chunk().add_constant(Value::Object(ident)) as u32;
+            self.context().ident_index_table.insert(ident, index);
+            index
+        }
     }
 
     /// Returns the position(at runtime) of the local variable on the stack

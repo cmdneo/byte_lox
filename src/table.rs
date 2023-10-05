@@ -10,38 +10,38 @@ const TABLE_MAX_LOAD: f32 = 0.70;
 ///
 /// It uses Open addressing, so the hash table is a single continguous block
 /// of memory. Linear probing is used for resolving collisions.
-pub struct Table<T: Clone + Copy> {
+pub struct Table<T> {
     buckets: Vec<Bucket<T>>,
     count: usize,
 }
 
-#[derive(Clone, Copy)]
-enum Bucket<T: Clone + Copy> {
+enum Bucket<T> {
     Filled(Entry<T>),
     Empty,
     Deleted,
 }
 
-#[derive(Clone, Copy)]
-struct Entry<T: Clone + Copy> {
+struct Entry<T> {
     key: GcObject,
     value: T,
 }
 
 impl<T: Clone + Copy> Table<T> {
+    pub fn copy_from(&mut self, from: &Table<T>) {
+        for entry in from.buckets.iter() {
+            if let Bucket::Filled(entry) = entry {
+                self.insert(entry.key, entry.value.clone());
+            }
+        }
+    }
+}
+
+impl<T> Table<T> {
     pub fn new() -> Self {
         // Initially create with capacity 0, so that the vector does not allocate.
         Self {
             buckets: vec![],
             count: 0,
-        }
-    }
-
-    pub fn copy_from(&mut self, from: &Table<T>) {
-        for entry in from.buckets.iter() {
-            if let Bucket::Filled(entry) = entry {
-                self.insert(entry.key, entry.value);
-            }
         }
     }
 
@@ -87,14 +87,14 @@ impl<T: Clone + Copy> Table<T> {
         }
     }
 
-    pub fn find(&self, key: GcObject) -> Option<T> {
+    pub fn find(&self, key: GcObject) -> Option<&T> {
         if self.capacity() == 0 {
             return None;
         }
 
         let index = self.entry_index(key);
-        if let Bucket::Filled(entry) = self.buckets[index] {
-            Some(entry.value)
+        if let Bucket::Filled(entry) = &self.buckets[index] {
+            Some(&entry.value)
         } else {
             None
         }
@@ -165,7 +165,8 @@ impl<T: Clone + Copy> Table<T> {
     fn adjust_capacity(&mut self, capacity: usize) {
         // Allocate a new table and swap it with the old table.
         // We need the contents of the old table for building the new table
-        let mut entries: Vec<Bucket<T>> = vec![Bucket::Empty; capacity];
+        let mut entries: Vec<Bucket<T>> = Vec::with_capacity(capacity);
+        entries.fill_with(|| Bucket::Empty);
         std::mem::swap(&mut self.buckets, &mut entries);
         self.count = 0;
 

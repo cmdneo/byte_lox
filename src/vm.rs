@@ -234,7 +234,7 @@ impl VM {
                 OpCode::GetGlobal => {
                     let name = self.read_object(is_long);
 
-                    if let Some(value) = self.globals.find(name) {
+                    if let Some(&value) = self.globals.find(name) {
                         self.push(value);
                     } else {
                         return self.error(&format!("Undefined variable '{}'.", name));
