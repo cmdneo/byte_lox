@@ -181,14 +181,14 @@ impl VM {
         loop {
             if cfg!(feature = "trace_execution") {
                 // Dump the stack
-                print!("          ");
+                eprint!("          ");
                 for value in self.stack.iter() {
-                    print!("[ {value} ]");
+                    eprint!("[ {value} ]");
                 }
 
                 let offset =
                     unsafe { self.frame.ip.offset_from(self.chunk().code.as_ptr()) } as usize;
-                println!();
+                eprintln!();
                 debug::disassemble_instruction(self.chunk(), offset);
             }
 

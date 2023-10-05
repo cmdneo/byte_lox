@@ -6,13 +6,13 @@ use crate::{
 
 /// Disassembles an instruction at the `offset` and pretty prints it.
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
-    print!("{offset:04} ");
+    eprint!("{offset:04} ");
 
     // If the current line is same as the previous then do not re-print it.
     if offset > 0 && chunk.get_line(offset) == chunk.get_line(offset - 1) {
-        print!("   | ")
+        eprint!("   | ")
     } else {
-        print!("{:4} ", chunk.get_line(offset));
+        eprint!("{:4} ", chunk.get_line(offset));
     }
 
     let opcode = chunk.code[offset];
@@ -84,7 +84,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
                 };
                 let index = u16::from_le_bytes([chunk.code[offset + 1], chunk.code[offset + 2]]);
 
-                println!("{offset:04}      | {:20} {captured_type:8} {index:4}", "");
+                eprintln!("{offset:04}      | {:20} {captured_type:8} {index:4}", "");
                 offset += 3;
             }
 
@@ -98,7 +98,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
 
 /// Disaasembles a chunk and pretty prints it.
 pub fn disassemble_chunk(chunk: &Chunk, name: &str) {
-    println!("==== {name} ====");
+    eprintln!("==== {name} ====");
 
     let mut offset = 0usize;
     while offset < chunk.code.len() {
@@ -110,7 +110,7 @@ pub fn disassemble_chunk(chunk: &Chunk, name: &str) {
 //---------------------------------------------------------
 /// Just print the opcode
 fn simple(name: &str, offset: usize) -> usize {
-    println!("{name}");
+    eprintln!("{name}");
     offset + 1
 }
 
@@ -118,7 +118,7 @@ fn simple(name: &str, offset: usize) -> usize {
 /// constant table which is indicated by opcode's operand bytes
 fn constant(name: &str, chunk: &Chunk, offset: usize) -> usize {
     let (operand, offset) = read_operand(chunk, offset);
-    println!("{name:-16} {operand:4} '{}'", chunk.constants[operand]);
+    eprintln!("{name:-16} {operand:4} '{}'", chunk.constants[operand]);
 
     offset
 }
@@ -126,7 +126,7 @@ fn constant(name: &str, chunk: &Chunk, offset: usize) -> usize {
 /// Print the opcode along with its operand bytes
 fn operand(name: &str, chunk: &Chunk, offset: usize) -> usize {
     let (operand, offset) = read_operand(chunk, offset);
-    println!("{name:-16} {operand:4}");
+    eprintln!("{name:-16} {operand:4}");
 
     offset
 }
@@ -137,9 +137,9 @@ fn jump_instruction(name: &str, chunk: &Chunk, offset: usize, sign: i8) -> usize
     let jmp_offset = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
 
     if sign > 0 {
-        println!("{name:-16} {jmp_offset:4} -> {}", offset + 3 + jmp_offset);
+        eprintln!("{name:-16} {jmp_offset:4} -> {}", offset + 3 + jmp_offset);
     } else {
-        println!("{name:-16} {jmp_offset:4} -> {}", offset + 3 - jmp_offset);
+        eprintln!("{name:-16} {jmp_offset:4} -> {}", offset + 3 - jmp_offset);
     }
 
     offset + 3
