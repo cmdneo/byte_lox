@@ -5,17 +5,18 @@
 //! We do verify some preconditions in debug build using [`debug_assert!`].
 
 use std::{
+    collections::BTreeMap,
     mem::replace,
     ops::{Add, Div, Mul, Sub},
     ptr::null,
 };
 
 use crate::{
-    chunk::OpCode,
+    chunk::{Chunk, OpCode},
     compiler, debug,
     garbage::GarbageCollector,
     native,
-    object::{Function, GcObject, Native, ObjectKind},
+    object::{Closure, GcObject, Native, ObjectKind, UpValue},
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -41,6 +42,25 @@ macro_rules! binary_cmp_op {
     };
 }
 
+/// Extract object of atype `variant` from the `object_value`
+macro_rules! object {
+    ($variant:ident from $object_value:expr) => {
+        if let ObjectKind::$variant(value) = &$object_value.kind {
+            value
+        } else {
+            unreachable!()
+        }
+    };
+
+    (mut $variant:ident from $object_value:expr) => {
+        if let ObjectKind::$variant(value) = &mut $object_value.kind {
+            value
+        } else {
+            unreachable!()
+        }
+    };
+}
+
 pub struct VM {
     /// Stack for storing temporararies and local variables
     stack: Stack<Value, STACK_MAX>,
@@ -51,9 +71,14 @@ pub struct VM {
     /// Currently active call frame.
     /// When no code is being executed it is a dummy value.
     frame: CallFrame,
-    ip: *const u8,
     /// Global variables table
     globals: Table<Value>,
+    /// UpValues which are still on the stack, we track them in case
+    /// we needed to share them with other closures.
+    /// Keep the values ordered which simplifies popping the value when
+    /// an open-upvalue is transformed to a closed-upvalue.
+    /// Stores `location` and the associated upvalue as `GcObject`.
+    open_upvalues: BTreeMap<*const Value, GcObject>,
     /// VM's mark and sweep garbage collector
     gc: GarbageCollector,
 }
@@ -64,9 +89,11 @@ pub enum InterpretError {
 }
 
 struct CallFrame {
-    // Store a raw pointers, they are fast.
-    /// Always use dot(Deref is implemented) to access it's fields.
-    function: *const Function,
+    // Pointer to the closure, the actual GcObject is stored on the
+    // stack while the frame is active, so we just store a raw pointer to
+    // it to avoid going through GcObject everytime.
+    /// Always use closure() method to dereference and acccess its fields
+    closure_ptr: *const Closure,
     /// Instruction pointer
     ip: *const u8,
     /// Frame/base pointer
@@ -74,27 +101,29 @@ struct CallFrame {
 }
 
 impl CallFrame {
-    fn new(function: &Function, ip: *const u8, fp: usize) -> Self {
-        Self { function, ip, fp }
+    fn new(closure: *const Closure, ip: *const u8, fp: usize) -> Self {
+        Self {
+            closure_ptr: closure,
+            ip,
+            fp,
+        }
+    }
+
+    #[inline]
+    fn closure(&self) -> &Closure {
+        // The closure object resides on the value stack
+        // as long as the call frame is active it is safe.
+        unsafe { &*(self.closure_ptr) }
     }
 }
 
 impl Default for CallFrame {
     fn default() -> Self {
         Self {
-            function: null(),
+            closure_ptr: null(),
             ip: null(),
             fp: 0,
         }
-    }
-}
-
-impl std::ops::Deref for CallFrame {
-    type Target = Function;
-    fn deref(&self) -> &Self::Target {
-        // The function object resides on the value stack
-        // as long as the call frame is active. So it is safe.
-        unsafe { self.function.as_ref().unwrap() }
     }
 }
 
@@ -113,10 +142,10 @@ impl VM {
         let mut ret = Self {
             stack: Stack::new(),
             call_frames: Stack::new(),
-            ip: null(),
             // Put a dummy frame as now no code is being executed
             frame: CallFrame::default(),
             globals: Table::new(),
+            open_upvalues: BTreeMap::new(),
             gc: GarbageCollector::new(),
         };
 
@@ -125,21 +154,22 @@ impl VM {
     }
 
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
-        if let Ok(object) = compiler::compile(source, &mut self.gc) {
-            let function = if let ObjectKind::Function(fun) = &object.kind {
-                fun
-            } else {
-                panic!("Compiled object must be a function object")
-            };
-
-            // The top-level code resides inside an implicitly defined function.
-            self.reset_stacks();
-            self.push(object.into());
-            self.call_function(function, 0)?;
-            self.run()
+        let object = if let Ok(obj) = compiler::compile(source, &mut self.gc) {
+            obj
         } else {
-            Err(InterpretError::Compile)
-        }
+            return Err(InterpretError::Compile);
+        };
+
+        self.reset_stacks();
+
+        self.push(Value::Object(object));
+        let closure = self.gc.create_object(Closure::new(object).into());
+        self.pop();
+
+        // The top-level code resides inside of an implicitly defined function.
+        self.push(Value::Object(closure));
+        self.call_value(Value::Object(closure), 0)?;
+        self.run()
     }
 
     fn reset_stacks(&mut self) {
@@ -156,13 +186,10 @@ impl VM {
                     print!("[ {value} ]");
                 }
 
-                let offset = unsafe {
-                    self.frame
-                        .ip
-                        .offset_from(self.frame.function.read().chunk.code.as_ptr())
-                } as usize;
+                let offset =
+                    unsafe { self.frame.ip.offset_from(self.chunk().code.as_ptr()) } as usize;
                 println!();
-                debug::disassemble_instruction(&self.frame.chunk, offset);
+                debug::disassemble_instruction(self.chunk(), offset);
             }
 
             let byte = self.next_byte();
@@ -214,6 +241,8 @@ impl VM {
                     }
                 }
 
+                // No need to pop the value after assingning in Sets below , since it is an
+                // expression and its result is the same as its operand.
                 OpCode::SetGlobal => {
                     let name = self.read_object(is_long);
 
@@ -222,9 +251,6 @@ impl VM {
                         self.globals.delete(name);
                         return self.error(&format!("Undefined variable '{}'.", name));
                     }
-
-                    // No need to pop the value after assingment, since it is an
-                    // expression and its result is the same as its operand.
                 }
 
                 OpCode::GetLocal => {
@@ -237,8 +263,17 @@ impl VM {
                     let slot = self.read_operand(is_long);
                     let slot = slot + self.frame.fp;
                     self.stack[slot] = self.peek(0);
-                    // No need to pop the value after assingment, since it is an
-                    // expression and its result is the same as its operand.
+                }
+
+                OpCode::GetUpvalue => {
+                    let slot = self.read_operand(is_long);
+                    let value = *self.get_upvalue_mut(slot);
+                    self.push(value);
+                }
+
+                OpCode::SetUpvalue => {
+                    let slot = self.read_operand(is_long);
+                    *self.get_upvalue_mut(slot) = self.peek(0);
                 }
 
                 OpCode::Equal => {
@@ -352,8 +387,49 @@ impl VM {
                     self.call_value(self.peek(arg_count), arg_count)?;
                 }
 
+                OpCode::Closure => {
+                    // The object is a function object
+                    let object = self.read_object(is_long);
+                    let mut closure = Closure::new(object);
+                    // self.gc.stop();
+
+                    // For each closed variable:
+                    // If the closed variable is local then we create a new reference
+                    // for it in the upvalue. If otherwise,
+                    // the closed variable is an uplvalue itself, then it must be
+                    // local to some enclosing function.
+                    // The declaration for that enclosing function has been (obviously)
+                    // already executed, therefore, it contains a valid reference
+                    // for the upvalue, we just copy that.
+                    // It is done recursively(by the compiler) so it works for nested cases.
+                    for uv in closure.upvalues.iter_mut() {
+                        let is_local = self.read_operand(false) == 1;
+                        let index = self.read_operand(true);
+
+                        if is_local {
+                            let local: *mut Value = &mut self.stack[self.frame.fp + index];
+                            *uv = self.create_upvalue(local);
+                        } else {
+                            *uv = self.frame.closure().upvalues[index];
+                        }
+                    }
+
+                    let closure = self.gc.create_object(closure.into());
+                    self.push(Value::Object(closure));
+                    // self.gc.start();
+                }
+
+                OpCode::CloseUpvalue => {
+                    self.close_upvalues(self.stack.top());
+                    self.pop();
+                }
+
                 OpCode::Return => {
                     let result = self.pop();
+                    // Close upvalues as before discarding a frame, as
+                    // POP/CLOSE_UPVALUE opcodes as not executed for outermost scope
+                    // of a function, we just discard the entire frame.
+                    self.close_upvalues(&self.stack[self.frame.fp]);
                     // Discard the function's stack window
                     self.stack.set_len(self.frame.fp);
                     self.frame = self.call_frames.pop();
@@ -373,14 +449,11 @@ impl VM {
     /// Print the error message along with stack trace and reset the stacks
     fn error(&mut self, message: &str) -> InterpretResult {
         let print_frame = |frame: &CallFrame, distance: usize| {
+            let function = &frame.closure().function();
             // Interpreter has already consumed the instruction, so back by 1.
-            let byte_index = unsafe {
-                frame
-                    .ip
-                    .offset_from(frame.function.read().chunk.code.as_ptr())
-            } as usize;
-            let line = frame.chunk.get_line(byte_index - 1);
-            let name = frame.name.to_string();
+            let byte_index = unsafe { frame.ip.offset_from(function.chunk.code.as_ptr()) } as usize;
+            let line = frame.closure().function().chunk.get_line(byte_index - 1);
+            let name = function.name.to_string();
 
             if name == "<script>" {
                 eprintln!("{distance:5}: [line {}] in {}", line, name);
@@ -403,14 +476,40 @@ impl VM {
         Err(InterpretError::Runtime)
     }
 
-    // Helper methods
+    // Execution operation methods
     //-----------------------------------------------------
+    /// Creates(if does not exist for the local) an upvalue and returns it.
+    fn create_upvalue(&mut self, local: *mut Value) -> GcObject {
+        if let Some(&uv) = self.open_upvalues.get(&(local as *const Value)) {
+            uv
+        } else {
+            let uv = self.gc.create_object(UpValue::new(local).into());
+            self.open_upvalues.insert(local, uv);
+            uv
+        }
+    }
+
+    /// Closes upvalues which lie after the `last`, including `last`.
+    fn close_upvalues(&mut self, last: *const Value) {
+        while let Some((&loc, &uv)) = self.open_upvalues.last_key_value() {
+            if loc < last {
+                break;
+            }
+
+            // An open upvalue is valid as long its associated local variable
+            // has not been popped off the stack.
+            let mut uv = uv;
+            unsafe { object!(mut UpValue from uv).close() };
+            self.open_upvalues.pop_last();
+        }
+    }
+
     /// Calls the value if it is a function or class object
     fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
         if let Value::Object(object) = callee {
             match &object.kind {
-                ObjectKind::Function(fun) => self.call_function(&fun, arg_count),
                 ObjectKind::Native(fun) => self.call_native(fun, arg_count),
+                ObjectKind::Closure(clos) => self.call_closure(clos, arg_count),
                 _ => self.error("Can only call functions and classes."),
             }
         } else {
@@ -418,7 +517,9 @@ impl VM {
         }
     }
 
-    fn call_function(&mut self, function: &Function, arg_count: usize) -> InterpretResult {
+    fn call_closure(&mut self, closure: &Closure, arg_count: usize) -> InterpretResult {
+        let function = closure.function();
+
         // Last opcode must be RETURN, otherwise it will cause UB(out-of-bounds)
         debug_assert!(
             function.chunk.code.last().unwrap().clone() == OpCode::Return as u8,
@@ -443,7 +544,7 @@ impl VM {
             &mut self.frame,
             // The arguments plus the function object (in slot zero of frame)
             CallFrame::new(
-                function,
+                closure,
                 function.chunk.code.as_ptr(),
                 self.stack.len() - arg_count - 1,
             ),
@@ -486,11 +587,14 @@ impl VM {
             let name = self.gc.intern_string(name.to_string());
             self.push(Value::Object(name));
 
-            let function = self.gc.create_object(ObjectKind::Native(Native {
-                name,
-                function,
-                arity,
-            }));
+            let function = self.gc.create_object(
+                Native {
+                    name,
+                    function,
+                    arity,
+                }
+                .into(),
+            );
             self.push(Value::Object(function));
 
             self.globals.insert(name, Value::Object(function));
@@ -500,8 +604,14 @@ impl VM {
         }
     }
 
-    // Helper functions
+    // Utility methods
     //-----------------------------------------------------
+    /// Currently executing chunks
+    #[inline]
+    fn chunk(&self) -> &Chunk {
+        &self.frame.closure().function().chunk
+    }
+
     #[inline]
     fn check_if_number(&mut self) -> InterpretResult {
         if self.stack.top().is_number() {
@@ -553,7 +663,7 @@ impl VM {
 
     fn read_constant(&mut self, is_long: bool) -> Value {
         let index = self.read_operand(is_long);
-        self.frame.chunk.constants[index]
+        self.frame.closure().function().chunk.constants[index]
     }
 
     #[inline]
@@ -564,6 +674,13 @@ impl VM {
         } else {
             self.next_byte() as usize
         }
+    }
+
+    #[inline]
+    fn get_upvalue_mut(&mut self, slot: usize) -> &mut Value {
+        // Upvalues are captured variable's addresses
+        let uv = object!(UpValue from self.frame.closure().upvalues[slot]);
+        unsafe { &mut *(uv.location) }
     }
 
     #[inline]

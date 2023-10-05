@@ -42,35 +42,11 @@ pub enum ObjectKind {
     String(Box<str>),
     Instance,
     Class,
+    UpValue(UpValue),
     Function(Function),
+    Closure(Closure),
     Native(Native),
     Invalid,
-}
-
-// Lox dynamically allocated object types
-//-----------------------------------------------
-/// Lox function object
-pub struct Function {
-    pub name: GcObject,
-    pub chunk: Chunk,
-    pub arity: u32,
-}
-
-/// Native functions object, for calling built-in functions
-pub struct Native {
-    pub name: GcObject,
-    pub function: NativeFunction,
-    pub arity: u32,
-}
-
-impl Function {
-    pub fn named(name: GcObject) -> Self {
-        Self {
-            name,
-            chunk: Chunk::new(),
-            arity: 0,
-        }
-    }
 }
 
 impl ObjectKind {
@@ -84,9 +60,38 @@ impl ObjectKind {
     }
 }
 
+// impl From<Instance> for ObjectKind {
+//     fn from(value: Instance) -> Self {
+//         Self::Instance
+//     }
+// }
+
 impl From<String> for ObjectKind {
     fn from(lexeme: String) -> Self {
         Self::String(lexeme.into_boxed_str())
+    }
+}
+
+impl From<UpValue> for ObjectKind {
+    fn from(value: UpValue) -> Self {
+        Self::UpValue(value)
+    }
+}
+impl From<Function> for ObjectKind {
+    fn from(value: Function) -> Self {
+        Self::Function(value)
+    }
+}
+
+impl From<Closure> for ObjectKind {
+    fn from(value: Closure) -> Self {
+        Self::Closure(value)
+    }
+}
+
+impl From<Native> for ObjectKind {
+    fn from(value: Native) -> Self {
+        Self::Native(value)
     }
 }
 
@@ -96,9 +101,95 @@ impl fmt::Display for ObjectKind {
             Self::String(s) => write!(f, "{s}"),
             Self::Instance => write!(f, "<instance of !>"),
             Self::Class => write!(f, "<class !>"),
+            Self::UpValue(uv) => write!(f, "<upvalue at {:?}>", uv.location),
             Self::Function(fun) => write!(f, "<fn {}>", fun.name),
+            Self::Closure(clos) => write!(f, "{}", clos.function().name),
             Self::Native(fun) => write!(f, "<native fn {}>", fun.name),
             Self::Invalid => unreachable!(),
+        }
+    }
+}
+
+// Lox dynamically allocated object types
+//-----------------------------------------------
+/// Lox function object
+pub struct Function {
+    pub name: GcObject,
+    pub chunk: Chunk,
+    pub arity: u32,
+    pub upvalue_count: u32,
+}
+
+/// Lox closures, contains the function object along with
+/// the environment which holds onto the captured variables.
+/// It is created at runtime only.
+pub struct Closure {
+    pub function_obj: GcObject,
+    pub upvalues: Box<[GcObject]>,
+}
+
+/// Native functions object, for calling built-in functions
+pub struct Native {
+    pub name: GcObject,
+    pub function: NativeFunction,
+    pub arity: u32,
+}
+
+pub struct UpValue {
+    /// Points to the stack slot for open-upvalue(variable is still in scope),
+    /// and to its `value` field for closed-upvalue(variable has gone out of scope).
+    /// For ensuring its validity call the `close()` method before popping off the
+    /// variable from the VM stack(that is, before `location` get invalidated).
+    pub location: *mut Value,
+    value: Value,
+}
+
+impl UpValue {
+    pub fn new(location: *mut Value) -> Self {
+        Self {
+            location,
+            value: Value::Nil,
+        }
+    }
+
+    /// Moves the upvalue to the heap, it exists as long as the upvalue object.
+    pub unsafe fn close(&mut self) {
+        self.value = *(self.location);
+        self.location = &mut self.value;
+    }
+}
+
+impl Function {
+    pub fn named(name: GcObject) -> Self {
+        Self {
+            name,
+            chunk: Chunk::new(),
+            arity: 0,
+            upvalue_count: 0,
+        }
+    }
+}
+
+impl Closure {
+    pub fn new(function: GcObject) -> Self {
+        let cnt = if let ObjectKind::Function(fun) = &function.kind {
+            fun.upvalue_count
+        } else {
+            panic!("Closure function_obj must be a function object.")
+        };
+
+        Self {
+            function_obj: function,
+            upvalues: vec![GcObject::default(); cnt as usize].into_boxed_slice(),
+        }
+    }
+
+    #[inline]
+    pub fn function(&self) -> &Function {
+        if let ObjectKind::Function(func) = &self.function_obj.kind {
+            func
+        } else {
+            panic!("Closure function_obj must be a function object.")
         }
     }
 }
@@ -180,14 +271,14 @@ impl Deref for GcObject {
 
     fn deref(&self) -> &Self::Target {
         debug_assert!(!self.object.is_null());
-        unsafe { self.object.as_ref().unwrap() }
+        unsafe { &*(self.object) }
     }
 }
 
 impl DerefMut for GcObject {
     fn deref_mut(&mut self) -> &mut Self::Target {
         debug_assert!(!self.object.is_null());
-        unsafe { self.object.as_mut().unwrap() }
+        unsafe { &mut *(self.object) }
     }
 }
 
