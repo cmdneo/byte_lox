@@ -87,7 +87,7 @@ impl<T: Clone + Copy> Table<T> {
         }
     }
 
-    pub fn find(&mut self, key: GcObject) -> Option<T> {
+    pub fn find(&self, key: GcObject) -> Option<T> {
         if self.capacity() == 0 {
             return None;
         }

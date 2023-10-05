@@ -4,7 +4,7 @@ use crate::{
     chunk::{Chunk, OpCode},
     debug,
     garbage::GarbageCollector,
-    object::{Function, GcObject, ObjectKind},
+    object::{Function, GcObject},
     scanner::{Scanner, Token, TokenKind},
     table::Table,
     value::Value,
@@ -191,7 +191,7 @@ impl<'a> Parser<'a> {
         if self.had_error.take() {
             Err(())
         } else {
-            Ok(self.gc.create_object(ObjectKind::Function(function)))
+            Ok(self.gc.create_object(function.into()))
         }
     }
 
@@ -751,7 +751,7 @@ impl<'a> Parser<'a> {
         } = self.pop_context(arity);
 
         // Make the function object and add it to enclosing chunk's contant table
-        let function = self.gc.create_object(ObjectKind::Function(function));
+        let function = self.gc.create_object(function.into());
         let index = self.chunk().add_constant(Value::Object(function)) as u32;
 
         // Wrap the function inside of a closure and then emit the upvalue vector

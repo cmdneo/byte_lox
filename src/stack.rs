@@ -20,11 +20,14 @@ impl<T, const CAP: usize> Stack<T, CAP> {
     }
 
     pub fn push(&mut self, value: T) {
+        debug_assert!(self.sp < CAP);
         self.array[self.sp].write(value);
         self.sp += 1;
     }
 
     pub fn pop(&mut self) -> T {
+        debug_assert!(self.sp > 0);
+
         self.sp -= 1;
 
         // All values before `self.sp` are guranteed to be initialized by
@@ -33,10 +36,12 @@ impl<T, const CAP: usize> Stack<T, CAP> {
     }
 
     pub fn top_mut(&mut self) -> &mut T {
+        debug_assert!(self.sp > 0);
         unsafe { self.array[self.sp - 1].assume_init_mut() }
     }
 
     pub fn top(&self) -> &T {
+        debug_assert!(self.sp > 0);
         unsafe { self.array[self.sp - 1].assume_init_ref() }
     }
 
@@ -46,9 +51,8 @@ impl<T, const CAP: usize> Stack<T, CAP> {
 
     /// Returns a slice of stack
     pub fn window(&self, start: usize, end: usize) -> &[T] {
-        if end > self.sp {
-            panic!("Invalid range for slicing the stack.");
-        }
+        debug_assert!(start <= end);
+        debug_assert!(end <= self.sp);
 
         // Everything before self.sp is initialized, and range is left inclusive only.
         unsafe { std::mem::transmute::<&[MaybeUninit<T>], &[T]>(&self.array[start..end]) }
@@ -63,6 +67,8 @@ impl<T, const CAP: usize> Stack<T, CAP> {
     }
 
     pub fn set_len(&mut self, new_len: usize) {
+        debug_assert!(new_len <= self.sp);
+
         for i in (new_len..self.sp).rev() {
             // Everything before self.sp is initialized
             unsafe {
