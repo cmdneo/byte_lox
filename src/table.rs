@@ -6,13 +6,33 @@ use crate::{
 const TABLE_MAX_LOAD: f32 = 0.70;
 
 /// Hash table for storing key-value pairs.
-/// Key should be a string and value is a generic parameter T.
+/// Key should be a string and value can be any generic type T.
 ///
 /// It uses Open addressing, so the hash table is a single continguous block
 /// of memory. Linear probing is used for resolving collisions.
 pub struct Table<T> {
     buckets: Vec<Bucket<T>>,
     count: usize,
+}
+
+/// Iterator for iterating over the table entries in a mutable way
+pub struct TableIterator<'a, T>(std::slice::Iter<'a, Bucket<T>>);
+
+impl<'a, T> Iterator for TableIterator<'a, T> {
+    type Item = (GcObject, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Return if a filled entry is found, continue on deleted or empty
+        loop {
+            if let Some(slot) = self.0.next() {
+                if let Bucket::Filled(kv) = slot {
+                    return Some((kv.key, &kv.value));
+                }
+            } else {
+                return None;
+            }
+        }
+    }
 }
 
 enum Bucket<T> {
@@ -33,6 +53,12 @@ impl<T: Clone + Copy> Table<T> {
                 self.insert(entry.key, entry.value.clone());
             }
         }
+    }
+}
+
+impl<'a, T> Table<T> {
+    pub fn iter(&'a mut self) -> TableIterator<'a, T> {
+        TableIterator(self.buckets.iter())
     }
 }
 
@@ -166,7 +192,10 @@ impl<T> Table<T> {
         // Allocate a new table and swap it with the old table.
         // We need the contents of the old table for building the new table
         let mut entries: Vec<Bucket<T>> = Vec::with_capacity(capacity);
-        entries.fill_with(|| Bucket::Empty);
+        for _ in 0..capacity {
+            entries.push(Bucket::Empty);
+        }
+
         std::mem::swap(&mut self.buckets, &mut entries);
         self.count = 0;
 
