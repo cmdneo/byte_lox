@@ -1,6 +1,6 @@
 use crate::{
     chunk::{Chunk, OpCode},
-    object::ObjectKind,
+    object::{obj_as, ObjectKind},
     value::Value,
 };
 
@@ -66,13 +66,9 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
             let (operand, offset) = read_operand(chunk, offset);
 
             let upvalue_count = if let Value::Object(obj) = chunk.constants[operand] {
-                if let ObjectKind::Function(fun) = &obj.kind {
-                    fun.upvalue_count as usize
-                } else {
-                    panic!("Closure operand must refer to a function object.")
-                }
+                obj_as!(Function from obj).upvalue_count as usize
             } else {
-                panic!("Closure operand must refer to a function object.")
+                unreachable!()
             };
 
             let mut offset = offset;

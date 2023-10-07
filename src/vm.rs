@@ -16,7 +16,7 @@ use crate::{
     compiler, debug,
     garbage::GarbageCollector,
     native,
-    object::{Closure, GcObject, Native, ObjectKind, UpValue},
+    object::{obj_as, Closure, GcObject, Native, ObjectKind, UpValue},
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -42,43 +42,28 @@ macro_rules! binary_cmp_op {
     };
 }
 
-/// Extract object of atype `variant` from the `object_value`
-macro_rules! object {
-    ($variant:ident from $object_value:expr) => {
-        if let ObjectKind::$variant(value) = &$object_value.kind {
-            value
-        } else {
-            unreachable!()
-        }
-    };
-
-    (mut $variant:ident from $object_value:expr) => {
-        if let ObjectKind::$variant(value) = &mut $object_value.kind {
-            value
-        } else {
-            unreachable!()
-        }
-    };
-}
-
 pub struct VM {
+    // All values stored in the VM need to be public, because the GC
+    // needs to access it for tracking them. We could have created
+    // a public function in VM itself for that and have the GC call it
+    // but we do not want GC logic inside of the VM, so no.
     /// Stack for storing temporararies and local variables
-    stack: Stack<Value, STACK_MAX>,
+    pub stack: Stack<Value, STACK_MAX>,
     /// Enclosing call frames,
     // NOTE: The dummy call frame which was created is pushed as the first
     // entry into it when we start executing code, so it should be ignored.
-    call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
+    pub call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
     /// Currently active call frame.
     /// When no code is being executed it is a dummy value.
-    frame: CallFrame,
+    pub frame: CallFrame,
     /// Global variables table
-    globals: Table<Value>,
+    pub globals: Table<Value>,
     /// UpValues which are still on the stack, we track them in case
     /// we needed to share them with other closures.
     /// Keep the values ordered which simplifies popping the value when
     /// an open-upvalue is transformed to a closed-upvalue.
     /// Stores `location` and the associated upvalue as `GcObject`.
-    open_upvalues: BTreeMap<*const Value, GcObject>,
+    pub open_upvalues: BTreeMap<*const Value, GcObject>,
     /// VM's mark and sweep garbage collector
     gc: GarbageCollector,
 }
@@ -88,11 +73,7 @@ pub enum InterpretError {
     Runtime,
 }
 
-struct CallFrame {
-    // Pointer to the closure, the actual GcObject is stored on the
-    // stack while the frame is active, so we just store a raw pointer to
-    // it to avoid going through GcObject everytime.
-    /// Always use closure() method to dereference and acccess its fields
+pub struct CallFrame {
     closure_ptr: *const Closure,
     /// Instruction pointer
     ip: *const u8,
@@ -137,7 +118,6 @@ impl Default for VM {
 
 impl VM {
     /// Creates a new VM.
-    /// Chunk must have a RETURN instruction at the end.
     pub fn new() -> Self {
         let mut ret = Self {
             stack: Stack::new(),
@@ -160,16 +140,23 @@ impl VM {
             return Err(InterpretError::Compile);
         };
 
+        let closure = self.gc.create_object(Closure::new(object).into());
+
+        // GC needs a reference to the VM to walk and mark the roots.
+        let vm_ptr = self as *mut VM;
+        self.gc.set_vm(vm_ptr);
+        self.gc.start();
         self.reset_stacks();
 
-        self.push(Value::Object(object));
-        let closure = self.gc.create_object(Closure::new(object).into());
-        self.pop();
-
         // The top-level code resides inside of an implicitly defined function.
+        // The first slot of the stack frame of a function call contains
+        // the object being called. So, we push the object before calling it.
         self.push(Value::Object(closure));
         self.call_value(Value::Object(closure), 0)?;
-        self.run()
+
+        let result = self.run();
+        self.gc.stop();
+        result
     }
 
     fn reset_stacks(&mut self) {
@@ -390,8 +377,9 @@ impl VM {
                 OpCode::Closure => {
                     // The object is a function object
                     let object = self.read_object(is_long);
-                    let mut closure = Closure::new(object);
-                    // self.gc.stop();
+                    let mut closure = self.gc.create_object(Closure::new(object).into());
+                    // Push to avoid GC collecting it when we create upvalues
+                    self.push(Value::Object(closure));
 
                     // For each closed variable:
                     // If the closed variable is local then we create a new reference
@@ -402,6 +390,7 @@ impl VM {
                     // already executed, therefore, it contains a valid reference
                     // for the upvalue, we just copy that.
                     // It is done recursively(by the compiler) so it works for nested cases.
+                    let closure = obj_as!(mut Closure from closure);
                     for uv in closure.upvalues.iter_mut() {
                         let is_local = self.read_operand(false) == 1;
                         let index = self.read_operand(true);
@@ -413,10 +402,6 @@ impl VM {
                             *uv = self.frame.closure().upvalues[index];
                         }
                     }
-
-                    let closure = self.gc.create_object(closure.into());
-                    self.push(Value::Object(closure));
-                    // self.gc.start();
                 }
 
                 OpCode::CloseUpvalue => {
@@ -499,7 +484,7 @@ impl VM {
             // An open upvalue is valid as long its associated local variable
             // has not been popped off the stack.
             let mut uv = uv;
-            unsafe { object!(mut UpValue from uv).close() };
+            unsafe { obj_as!(mut UpValue from uv).close() };
             self.open_upvalues.pop_last();
         }
     }
@@ -679,7 +664,7 @@ impl VM {
     #[inline]
     fn get_upvalue_mut(&mut self, slot: usize) -> &mut Value {
         // Upvalues are captured variable's addresses
-        let uv = object!(UpValue from self.frame.closure().upvalues[slot]);
+        let uv = obj_as!(UpValue from self.frame.closure().upvalues[slot]);
         unsafe { &mut *(uv.location) }
     }
 
