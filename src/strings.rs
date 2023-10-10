@@ -15,6 +15,8 @@ pub fn hash_string(string: &str) -> u32 {
     hash.0
 }
 
+/// Creates a new string object which is the concatenation of `lhs` and `rhs`
+/// The newly created string is interned.
 pub fn add_strings(lhs: &Value, rhs: &Value, gc: &mut GarbageCollector) -> Value {
     match (lhs, rhs) {
         (Value::Object(x), Value::Object(y)) => match (&x.kind, &y.kind) {

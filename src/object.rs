@@ -68,19 +68,6 @@ pub enum ObjectKind {
 }
 
 impl ObjectKind {
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Self::String(_) => "STRING",
-            Self::Instance => "INSTANCE",
-            Self::Class => "CLASS",
-            Self::UpValue(_) => "UPVALUE",
-            Self::Function(_) => "FUNCTION",
-            Self::Closure(_) => "CLOSURE",
-            Self::Native(_) => "NATIVE",
-            Self::Invalid => unreachable!(),
-        }
-    }
-
     /// Calculates hash function of an Object,
     /// If a type is not hashable then just hash it's pointer.
     pub fn hash(&self, ptr: *const Object) -> u32 {
@@ -143,6 +130,7 @@ impl fmt::Display for ObjectKind {
 
 // Lox dynamically allocated object types
 //-----------------------------------------------
+
 /// Lox function object
 pub struct Function {
     pub name: GcObject,
@@ -161,7 +149,8 @@ pub struct Closure {
 
 /// Native functions object, for calling built-in functions
 pub struct Native {
-    pub name: GcObject,
+    // Native function names are fixed
+    pub name: &'static str,
     pub function: NativeFunction,
     pub arity: u32,
 }
@@ -219,10 +208,6 @@ impl Closure {
 
     #[inline]
     pub fn function(&self) -> &Function {
-        if let ObjectKind::Function(func) = &self.function_obj.kind {
-            func
-        } else {
-            unreachable!()
-        }
+        obj_as!(Function from self.function_obj)
     }
 }
