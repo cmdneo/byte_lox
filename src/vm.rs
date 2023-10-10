@@ -294,10 +294,15 @@ impl VM {
                 OpCode::Add => {
                     self.check_if_numbers_or_strings()?;
 
+                    // Do not pop before concatenating the two strings, as it
+                    // needs allocating a new string object which can trigger a
+                    // garbage collection. We could have paused the GC but no...
                     if self.peek(0).is_string() {
-                        let rhs = self.pop();
-                        let lhs = self.pop();
+                        let lhs = self.peek(1);
+                        let rhs = self.peek(0);
                         let result = add_strings(&lhs, &rhs, &mut self.gc);
+                        self.pop();
+                        self.pop();
                         self.push(result);
                     } else {
                         binary_arith_op!(self, add);
@@ -429,9 +434,8 @@ impl VM {
         }
     }
 
-    // Error reporting and recovery methods
-    //-----------------------------------------------------
-    /// Print the error message along with stack trace and reset the stacks
+    /// Print the error message along with stack trace and resets the stacks.
+    /// Returns a value indicating runtime-error.
     fn error(&mut self, message: &str) -> InterpretResult {
         let print_frame = |frame: &CallFrame, distance: usize| {
             let function = &frame.closure().function();
@@ -458,6 +462,7 @@ impl VM {
 
         self.frame = CallFrame::default();
         self.reset_stacks();
+        self.gc.stop();
         Err(InterpretError::Runtime)
     }
 
@@ -568,10 +573,6 @@ impl VM {
 
     fn define_native(&mut self) {
         for (name, function, arity) in native::NATIVE_FUNCTIONS {
-            // Push values immediately to avoid GC removing them
-            let name = self.gc.intern_string(name.to_string());
-            self.push(Value::Object(name));
-
             let function = self.gc.create_object(
                 Native {
                     name,
@@ -580,12 +581,8 @@ impl VM {
                 }
                 .into(),
             );
-            self.push(Value::Object(function));
-
+            let name = self.gc.intern_string(name.to_string());
             self.globals.insert(name, Value::Object(function));
-
-            self.pop();
-            self.pop();
         }
     }
 

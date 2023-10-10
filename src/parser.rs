@@ -171,8 +171,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parsed the source and returns the resulting function Object
+    /// Parses the source and returns the resulting function Object
     pub fn parse(mut self) -> Result<GcObject, ()> {
+        // The GC does not mark any values created during this phase, so stop it from
+        // collecting any objects created during this phase.
+        self.gc.stop();
+
         let name = self.gc.intern_string(String::from("<script>"));
         self.push_context(name);
 

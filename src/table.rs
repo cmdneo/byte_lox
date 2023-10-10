@@ -11,8 +11,12 @@ const TABLE_MAX_LOAD: f32 = 0.70;
 /// It uses Open addressing, so the hash table is a single continguous block
 /// of memory. Linear probing is used for resolving collisions.
 pub struct Table<T> {
+    /// Vector for buckets of the hash table.
     buckets: Vec<Bucket<T>>,
+    /// Counts the number of non-empty(Deleted and Filled) buckets.
     count: usize,
+    /// Counts the number of filled buckets
+    filled_count: usize,
 }
 
 /// Iterator for iterating over the table entries in a mutable way
@@ -57,7 +61,7 @@ impl<T: Clone + Copy> Table<T> {
 }
 
 impl<'a, T> Table<T> {
-    pub fn iter(&'a mut self) -> TableIterator<'a, T> {
+    pub fn iter(&'a self) -> TableIterator<'a, T> {
         TableIterator(self.buckets.iter())
     }
 }
@@ -68,6 +72,7 @@ impl<T> Table<T> {
         Self {
             buckets: vec![],
             count: 0,
+            filled_count: 0,
         }
     }
 
@@ -76,7 +81,8 @@ impl<T> Table<T> {
     /// otherwise it overwrites the value of the key and returns false.
     pub fn insert(&mut self, key: GcObject, value: T) -> bool {
         // Resize the table if load factor exceeds the max load factor
-        if (self.count + 1) as f32 > (self.capacity() as f32) * TABLE_MAX_LOAD {
+        let load = (self.count as f32 + 1.0) / (self.capacity() as f32);
+        if load > TABLE_MAX_LOAD {
             let cap = next_capacity(self.capacity());
             self.adjust_capacity(cap);
         }
@@ -89,6 +95,7 @@ impl<T> Table<T> {
         if matches!(entry, Bucket::Empty) {
             self.count += 1;
         }
+        self.filled_count += 1;
 
         let is_new_key = matches!(entry, Bucket::Empty | Bucket::Deleted);
         *entry = Bucket::Filled(Entry { key, value });
@@ -99,7 +106,7 @@ impl<T> Table<T> {
     /// Deletes an entry with the given key.
     /// Returns true if the entry was present and deleted otherwise false.
     ///
-    /// NOTE: Deleting entries does not lower the load factor table due to
+    /// NOTE: Deleting entries does not lower the load factor of the table due to
     /// implementation constraints. So use the delete operation sparingly.
     pub fn delete(&mut self, key: GcObject) -> bool {
         // We do not consider Deleted entries(tombstones) empty buckets,
@@ -107,9 +114,24 @@ impl<T> Table<T> {
         let index = self.entry_index(key);
         if let Bucket::Filled(_) = self.buckets[index] {
             self.buckets[index] = Bucket::Deleted;
+            self.filled_count -= 1;
             true
         } else {
             false
+        }
+    }
+
+    /// Retains the only entries which satisfy the predicate.
+    pub fn retain(&mut self, predicate: impl Fn(GcObject, &T) -> bool) {
+        for bucket in self.buckets.iter_mut() {
+            if let Bucket::Filled(entry) = bucket {
+                if predicate(entry.key, &entry.value) {
+                    continue;
+                }
+
+                self.filled_count -= 1;
+                *bucket = Bucket::Deleted;
+            }
         }
     }
 
@@ -152,12 +174,17 @@ impl<T> Table<T> {
 
                 Bucket::Empty => return None,
 
-                // Continue searching if hash did not match or a deleted slot is found.
+                // Continue searching until an empty slot is found.
                 _ => (),
             }
 
             index = (index + 1) % self.capacity();
         }
+    }
+
+    /// Returns the number of entries in the table.
+    pub fn len(&self) -> usize {
+        self.filled_count
     }
 
     /// Returns the index of the corresponding bucket for the entry
@@ -216,7 +243,7 @@ impl<T> Table<T> {
 }
 
 fn next_capacity(capacity: usize) -> usize {
-    if capacity == 0 {
+    if capacity * 2 < 8 {
         8
     } else {
         capacity * 2

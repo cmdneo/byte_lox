@@ -8,5 +8,7 @@ edition = "2021"
 [features]
 trace_execution = []
 trace_codegen = []
+trace_gc = []
+stress_gc = []
 
 [dependencies]
