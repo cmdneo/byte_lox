@@ -259,9 +259,27 @@ impl<'a> Parser<'a> {
             self.var_declaration()
         } else if self.match_it(TokenKind::Fun) {
             self.fun_declaration()
+        } else if self.match_it(TokenKind::Class) {
+            self.class_declaration()
         } else {
             self.statement()
         }
+    }
+
+    fn class_declaration(&mut self) -> ParseResult {
+        let name = self.consume(TokenKind::Identifier, "Expect class name.")?;
+        let name_idx = self.add_identifier_constant(&name);
+
+        self.declare_variable();
+        self.emit_with_operand(OpCode::Class, name_idx);
+        // A class can refer itself inside itself
+        self.define_variable(name_idx);
+
+        self.consume(TokenKind::LeftBrace, "Expect '{' before class body.")?;
+        // TODO parse class body
+        self.consume(TokenKind::RightBrace, "Expect '}' after class body.")?;
+
+        Ok(())
     }
 
     fn var_declaration(&mut self) -> ParseResult {
@@ -350,7 +368,8 @@ impl<'a> Parser<'a> {
             self.error("Continue statement outside loop.");
         }
 
-        self.consume(TokenKind::Semicolon, "Expect ';' after 'continue'.")
+        self.consume(TokenKind::Semicolon, "Expect ';' after 'continue'.")?;
+        Ok(())
     }
 
     fn break_statement(&mut self) -> ParseResult {
@@ -366,7 +385,8 @@ impl<'a> Parser<'a> {
             self.error("Break statement outside loop.");
         }
 
-        self.consume(TokenKind::Semicolon, "Expect ';' after 'break'.")
+        self.consume(TokenKind::Semicolon, "Expect ';' after 'break'.")?;
+        Ok(())
     }
 
     fn return_statement(&mut self) -> ParseResult {
@@ -521,7 +541,8 @@ impl<'a> Parser<'a> {
             self.declaration()?;
         }
 
-        self.consume(TokenKind::RightBrace, "Expect '}' after block")
+        self.consume(TokenKind::RightBrace, "Expect '}' after block")?;
+        Ok(())
     }
 
     fn expression_statement(&mut self) -> ParseResult {
@@ -563,7 +584,7 @@ impl<'a> Parser<'a> {
         // Rule like: (binop expr)*
         while min_prec <= infix_precedence(self.current.kind) {
             self.advance(); // Consume the operator token
-            self.exec_infix_rule(self.previous.kind)?;
+            self.exec_infix_rule(self.previous.kind, can_assign)?;
         }
 
         Ok(())
@@ -575,7 +596,8 @@ impl<'a> Parser<'a> {
 
     fn grouping(&mut self) -> ParseResult {
         self.expression()?;
-        self.consume(TokenKind::RightParen, "Expect ')' after expression.")
+        self.consume(TokenKind::RightParen, "Expect ')' after expression.")?;
+        Ok(())
     }
 
     fn unary(&mut self) -> ParseResult {
@@ -645,6 +667,20 @@ impl<'a> Parser<'a> {
         self.parse_precedence(Precedence::Or)?;
 
         self.patch_jump(end_jump);
+        Ok(())
+    }
+
+    fn dot(&mut self, can_assign: bool) -> ParseResult {
+        let name = self.consume(TokenKind::Identifier, "Expect property name after '.'")?;
+        let name_idx = self.add_identifier_constant(&name);
+
+        if can_assign && self.match_it(TokenKind::Equal) {
+            self.expression()?;
+            self.emit_with_operand(OpCode::SetProperty, name_idx);
+        } else {
+            self.emit_with_operand(OpCode::GetProperty, name_idx);
+        }
+
         Ok(())
     }
 
@@ -830,7 +866,7 @@ impl<'a> Parser<'a> {
     /// Consumes the variable name and stores it.
     /// Globals(dynamically bound) and locals(statically bound) are stored differently.
     fn parse_new_variable(&mut self, message: &str) -> Result<u32, ()> {
-        self.consume(TokenKind::Identifier, message)?;
+        let name = self.consume(TokenKind::Identifier, message)?;
         self.declare_variable();
 
         // Local variables are resovled at compile time, so there is no need to
@@ -842,12 +878,12 @@ impl<'a> Parser<'a> {
         // But global variables are resolved at runtime(late bound), so their
         // names must be available to the runtime, we do this by storing their
         // names in the chunk's constant table and obtaining an index for it.
-        let name = self.previous;
         Ok(self.add_identifier_constant(&name))
     }
 
     // Utility methods
     //-----------------------------------------------------
+    /// Acknowledge that the variable exists, but is not ready for use.
     fn declare_variable(&mut self) {
         // Global variables are late bound so we don't care about them here.
         if self.context().scope_depth == 0 {
@@ -874,6 +910,8 @@ impl<'a> Parser<'a> {
         self.context().locals.push(Local::new(name, -1, false));
     }
 
+    /// Defines a variable(can global or local as per scope).
+    /// The value to be bound to the variable must be present on stack top.
     fn define_variable(&mut self, name_index: u32) {
         // Local variables are stored on the stack decided at compile time.
         // We not need any extra code to create a local variable at runtime.
@@ -1103,13 +1141,12 @@ impl<'a> Parser<'a> {
     fn advance(&mut self) -> Token {
         self.previous = self.current;
         self.current = self.scan_token();
-        self.current
+        self.previous
     }
 
-    fn consume(&mut self, kind: TokenKind, message: &str) -> ParseResult {
+    fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, ()> {
         if self.check(kind) {
-            self.advance();
-            Ok(())
+            Ok(self.advance())
         } else {
             self.error_at(&self.current, message);
             Err(())
@@ -1173,7 +1210,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn exec_infix_rule(&mut self, operator: TokenKind) -> ParseResult {
+    fn exec_infix_rule(&mut self, operator: TokenKind, can_assign: bool) -> ParseResult {
         match operator {
             TokenKind::Minus
             | TokenKind::Plus
@@ -1188,6 +1225,8 @@ impl<'a> Parser<'a> {
 
             TokenKind::And => self.and(),
             TokenKind::Or => self.or(),
+
+            TokenKind::Dot => self.dot(can_assign),
 
             // Actually every operator that is not prefix is considered infix
             TokenKind::Question => self.ternary(),

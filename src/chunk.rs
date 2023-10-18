@@ -41,6 +41,11 @@ pub enum OpCode {
     GetUpvalue,
     /// Set an upvalue
     SetUpvalue,
+    /// Get property value
+    GetProperty,
+    /// Set property value
+    SetProperty,
+    
 
     // Equality operators, work on all types
     Equal,
@@ -91,6 +96,9 @@ pub enum OpCode {
     /// Converts an open upvalue to closed upvalue
     CloseUpvalue,
 
+    /// Create a class object
+    Class,
+
     /// Return from a procedure.
     Return,
     // Keeep this Return opcode at last!
@@ -112,6 +120,9 @@ impl TryFrom<u8> for OpCode {
     }
 }
 
+/// Stores the compiled bytecode along with associated constants.
+/// It is considered a part of the VM memory since it is stored as such,
+/// so we use LoxAlloc for this.
 pub struct Chunk {
     pub code: Vec<u8>,
     pub constants: Vec<Value>,

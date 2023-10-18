@@ -1,5 +1,5 @@
 use crate::{
-    object::{GcObject, ObjectKind},
+    object::{obj_as, GcObject, ObjectKind},
     strings::hash_string,
 };
 
@@ -148,7 +148,7 @@ impl<T> Table<T> {
         }
     }
 
-    /// Finds the string(key) and returns the associated object.
+    /// Finds the string(key) and return it.
     /// All keys in the table should be of string type for this method to work.
     ///
     /// This method is used for string interning purposes.
@@ -163,12 +163,11 @@ impl<T> Table<T> {
         loop {
             match &self.buckets[index] {
                 Bucket::Filled(entry) if entry.key.hash == hash => {
-                    if let ObjectKind::String(key) = &entry.key.kind {
-                        if string.as_bytes() == key.as_bytes() {
-                            return Some(entry.key);
-                        }
-                    } else {
-                        panic!("Key not of string type");
+                    let key = obj_as!(String from entry.key);
+                    // The string being searched may not be interned as this method
+                    // is used for string interning purposes, so comparison is needed.
+                    if string.as_bytes() == key.as_bytes() {
+                        return Some(entry.key);
                     }
                 }
 

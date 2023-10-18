@@ -1,6 +1,5 @@
 use std::{
     fmt,
-    mem::size_of,
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
 };
@@ -20,7 +19,8 @@ macro_rules! trace_gc {
     };
 }
 
-const FIRST_COLLECT_AFTER: usize = 1 << 16; // 64 KiB
+// TODO Track number of bytes allocated in the heap instead of number of objects
+const FIRST_COLLECT_AFTER: usize = 256; // 1024 objects
 const HEAP_GROW_FACTOR: usize = 2;
 
 /// Mark & sweep stop-the-world garbage collector for the lox language.
@@ -34,8 +34,8 @@ const HEAP_GROW_FACTOR: usize = 2;
 /// We do not keep a mut pointer to the parser(which compiles bytecode too)
 /// even though it creates a lot of objects, because then the GC is paused.
 pub struct GarbageCollector {
-    /// List of currently allocated objects along with their size in bytes.
-    objects: Vec<(GcObject, usize)>,
+    /// List of currently allocated objects.
+    objects: Vec<GcObject>,
     /// Contains all the interned strings.
     /// We treat string objects in it as weak references instead of roots.
     /// This allows us to remove unreachable interned strings.
@@ -56,8 +56,6 @@ pub struct GarbageCollector {
     alloc_cnt: usize,
     /// Total number of objects garbage collected
     free_cnt: usize,
-    /// Total bytes allocated.
-    bytes_allocated: usize,
     /// Threshold for running `collect` again.
     next_gc_after: usize,
     /// Number of times collect was run(not counted when the GC is paused).
@@ -70,6 +68,8 @@ pub struct GarbageCollector {
 struct Tracer {
     /// This list maintains the list of objects which have been marked reachable
     /// but not yet processed, that is, what other objects are reachable via it.
+    // Do not use LoxALloc for this, this should remain independent.
+    // This acts as a stack for tracing the object references via DFS.
     gray_stack: Vec<GcObject>, // Gray area...
 }
 
@@ -126,12 +126,16 @@ impl Tracer {
         );
 
         match &object.kind {
-            ObjectKind::Instance => {
-                unimplemented!()
+            ObjectKind::Instance(ins) => {
+                self.mark_object(ins.class_obj);
+                for (object, &value) in ins.fields.iter() {
+                    self.mark_object(object);
+                    self.mark_value(value);
+                }
             }
 
-            ObjectKind::Class => {
-                unimplemented!()
+            ObjectKind::Class(cls) => {
+                self.mark_object(cls.name);
             }
 
             ObjectKind::UpValue(uv) => {
@@ -172,7 +176,6 @@ impl GarbageCollector {
             vm: null_mut(),
             alloc_cnt: 0,
             free_cnt: 0,
-            bytes_allocated: 0,
             next_gc_after: FIRST_COLLECT_AFTER,
             collect_count: 0,
         }
@@ -190,24 +193,23 @@ impl GarbageCollector {
         }
         trace_gc!("-- gc begin");
         let old_objects = self.objects.len();
-        let old_bytes = self.bytes_allocated;
+        // let old_bytes = bytes_allocated();
 
         self.mark_roots();
         self.tracer.trace_references();
         self.strings.retain(|key, _| key.marked); // Remove unmarked strings
         self.sweep();
 
-        self.next_gc_after = self.bytes_allocated * HEAP_GROW_FACTOR;
+        self.next_gc_after = self.objects.len() * HEAP_GROW_FACTOR;
         self.collect_count += 1;
 
         trace_gc!("-- gc end");
-        trace_gc!(
-            "   collected {} bytes (from {} to {}) next at {}",
-            old_bytes - self.bytes_allocated,
-            old_bytes,
-            self.bytes_allocated,
-            self.next_gc_after
-        );
+        // trace_gc!(
+        //     "   collected {} bytes (from {} to {})",
+        //     old_bytes - bytes_allocated(),
+        //     old_bytes,
+        //     bytes_allocated()
+        // );
         trace_gc!(
             "   collected {} objects (from {} to {})",
             old_objects - self.objects.len(),
@@ -240,14 +242,13 @@ impl GarbageCollector {
     }
 
     pub fn create_object(&mut self, object: ObjectKind) -> GcObject {
-        if cfg!(feature = "stress_gc") || self.bytes_allocated > self.next_gc_after {
+        if cfg!(feature = "stress_gc") || self.objects.len() > self.next_gc_after {
             self.collect();
         }
 
-        let (gc_obj, size) = unsafe { GcObject::allocate(object) };
-        self.objects.push((gc_obj, size));
+        let gc_obj = unsafe { GcObject::allocate(object) };
+        self.objects.push(gc_obj);
         self.alloc_cnt += 1;
-        self.bytes_allocated += size;
 
         gc_obj
     }
@@ -278,13 +279,12 @@ impl GarbageCollector {
         while i < self.objects.len() {
             // Swap it with last for O(1) removal, and do not increment i
             // since, the value with which it is swapped needs to be processed.
-            if !self.objects[i].0.marked {
-                let (unmarked, size) = self.objects.swap_remove(i);
+            if !self.objects[i].marked {
+                let unmarked = self.objects.swap_remove(i);
                 unsafe { unmarked.deallocate() };
                 self.free_cnt += 1;
-                self.bytes_allocated -= size;
             } else {
-                self.objects[i].0.marked = false;
+                self.objects[i].marked = false;
                 i += 1;
             }
         }
@@ -298,7 +298,6 @@ impl Drop for GarbageCollector {
         trace_gc!("Total objects allocated: {}", self.alloc_cnt);
         trace_gc!("Total objects freed    : {}", self.free_cnt);
         trace_gc!("Total objects active   : {}", self.objects.len());
-        trace_gc!("Total object bytes     : {}", self.bytes_allocated);
         trace_gc!("Total interned strings : {}", self.strings.len());
         trace_gc!("Times collect was run  : {}", self.collect_count);
         trace_gc!("-----------------------------------------------");
@@ -307,7 +306,7 @@ impl Drop for GarbageCollector {
         trace_gc!("Freeing remaining objects...");
         while !self.objects.is_empty() {
             unsafe {
-                self.objects.pop().unwrap().0.deallocate();
+                self.objects.pop().unwrap().deallocate();
             }
         }
     }
@@ -342,7 +341,7 @@ impl GcObject {
     }
 
     /// Returns the allocated object along with bytes allocated
-    unsafe fn allocate(object: ObjectKind) -> (Self, usize) {
+    unsafe fn allocate(object: ObjectKind) -> Self {
         let new_object = Box::new(Object::default());
         let ptr = Box::leak(new_object) as *mut Object;
 
@@ -354,18 +353,11 @@ impl GcObject {
             kind: object,
         };
 
-        // Since we dot use a custom memory allocator, we need to
-        // manually calculate the size of the allocated object and hope
-        // that it is correct.
-        let size = calculate_size(&object);
         ptr.replace(object);
 
-        (
-            GcObject {
-                object_ptr: NonNull::new(ptr).unwrap(),
-            },
-            size,
-        )
+        GcObject {
+            object_ptr: NonNull::new(ptr).unwrap(),
+        }
     }
 
     unsafe fn deallocate(self) {
@@ -433,8 +425,8 @@ impl fmt::Display for GcObject {
 fn fmt_as_type_value(object: &ObjectKind) -> String {
     let type_name = match object {
         ObjectKind::String(_) => "STRING",
-        ObjectKind::Instance => "INSTANCE",
-        ObjectKind::Class => "CLASS",
+        ObjectKind::Instance(_) => "INSTANCE",
+        ObjectKind::Class(_) => "CLASS",
         ObjectKind::UpValue(_) => "UPVALUE",
         ObjectKind::Function(_) => "FUNCTION",
         ObjectKind::Closure(_) => "CLOSURE",
@@ -443,20 +435,4 @@ fn fmt_as_type_value(object: &ObjectKind) -> String {
     };
 
     format!("{:8} = {}", type_name, object)
-}
-
-/// Calculates size of the object passed along with the size of
-/// dynamically allocated fields which are not of type `GcObject`.
-#[inline(always)]
-fn calculate_size(object: &Object) -> usize {
-    // All kinds dynamically allocated embedded fields are boxed slices.
-    let embedded = match &object.kind {
-        ObjectKind::Class => unimplemented!(),
-        ObjectKind::Instance => unimplemented!(),
-        ObjectKind::String(s) => s.len(),
-        ObjectKind::Closure(c) => c.upvalues.len() * size_of::<GcObject>(),
-        _ => 0,
-    };
-
-    size_of::<Object>() + embedded
 }

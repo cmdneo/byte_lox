@@ -37,6 +37,8 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         SetLocal => operand("SET_LOCAL", chunk, offset),
         GetUpvalue => operand("GET_UPVALUE", chunk, offset),
         SetUpvalue => operand("SET_UPVALUE", chunk, offset),
+        GetProperty => constant("GET_PROPERTY", chunk, offset),
+        SetProperty => constant("SET_PROPERTY", chunk, offset),
 
         Equal => simple("EQUAL", offset),
         NotEqual => simple("NOT_EQUAL", offset),
@@ -87,6 +89,8 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
             offset
         }
         CloseUpvalue => simple("CLOSE_UPVALUE", offset),
+
+        Class => constant("CLASS", chunk, offset),
 
         Return => simple("RETURN", offset),
     }

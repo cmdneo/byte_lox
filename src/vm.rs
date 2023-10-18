@@ -16,7 +16,7 @@ use crate::{
     compiler, debug,
     garbage::GarbageCollector,
     native,
-    object::{obj_as, Closure, GcObject, Native, ObjectKind, UpValue},
+    object::{obj_as, Class, Closure, GcObject, Instance, Native, ObjectKind, UpValue},
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -42,6 +42,7 @@ macro_rules! binary_cmp_op {
     };
 }
 
+/// The Lox bytecode virtual machine.
 pub struct VM {
     // All values stored in the VM need to be public, because the GC
     // needs to access it for tracking them. We could have created
@@ -263,6 +264,39 @@ impl VM {
                     *self.get_upvalue_mut(slot) = self.peek(0);
                 }
 
+                OpCode::GetProperty => {
+                    let name = self.read_object(is_long);
+                    let mut instance = self.peek(0);
+                    let instance = if let Ok(ins) = instance.as_instance() {
+                        ins
+                    } else {
+                        return self.error("Only instances have fields.");
+                    };
+
+                    if let Some(&value) = instance.fields.find(name) {
+                        self.pop(); // Instance
+                        self.push(value);
+                    } else {
+                        return self.error(&format!("Undefined property '{name}'."));
+                    }
+                }
+
+                OpCode::SetProperty => {
+                    let name = self.read_object(is_long);
+                    let mut instance = self.peek(1);
+                    let instance = if let Ok(ins) = instance.as_instance() {
+                        ins
+                    } else {
+                        return self.error("Only instances have fields.");
+                    };
+
+                    instance.fields.insert(name, self.peek(0));
+                    // Pop the instance and push result of the assingment back.
+                    let value = self.pop();
+                    self.pop(); // Instance
+                    self.push(value);
+                }
+
                 OpCode::Equal => {
                     binary_cmp_op!(self, eq);
                 }
@@ -414,6 +448,12 @@ impl VM {
                     self.pop();
                 }
 
+                OpCode::Class => {
+                    let name = self.read_object(is_long);
+                    let class = self.gc.create_object(Class::new(name).into());
+                    self.push(Value::Object(class));
+                }
+
                 OpCode::Return => {
                     let result = self.pop();
                     // Close upvalues as before discarding a frame, as
@@ -498,6 +538,12 @@ impl VM {
     fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
         if let Value::Object(object) = callee {
             match &object.kind {
+                ObjectKind::Class(_) => {
+                    self.stack.set_len(self.stack.len() - arg_count - 1);
+                    let instance = self.gc.create_object(Instance::new(object).into());
+                    self.push(Value::Object(instance));
+                    Ok(())
+                }
                 ObjectKind::Native(fun) => self.call_native(fun, arg_count),
                 ObjectKind::Closure(clos) => self.call_closure(clos, arg_count),
                 _ => self.error("Can only call functions and classes."),
@@ -682,5 +728,13 @@ impl VM {
 
     fn stack_apply(&mut self, func: impl FnOnce(Value) -> Value) {
         *self.stack.top_mut() = func(self.stack.top_mut().clone());
+    }
+}
+
+fn value_to_object(value: Value) -> Option<GcObject> {
+    if let Value::Object(obj) = value {
+        Some(obj)
+    } else {
+        None
     }
 }

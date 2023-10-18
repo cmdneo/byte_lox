@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::{chunk::Chunk, native::NativeFunction, strings::hash_string, value::Value};
+use crate::{
+    chunk::Chunk, native::NativeFunction, strings::hash_string, table::Table, value::Value,
+};
 
 // Re-export, make it available from the object module
 pub use crate::garbage::GcObject;
@@ -58,8 +60,8 @@ impl Default for Object {
 pub enum ObjectKind {
     // Not using string::String as size of a string is always fixed
     String(Box<str>),
-    Instance,
-    Class,
+    Instance(Instance),
+    Class(Class),
     UpValue(UpValue),
     Function(Function),
     Closure(Closure),
@@ -78,11 +80,25 @@ impl ObjectKind {
     }
 }
 
-// impl From<Instance> for ObjectKind {
-//     fn from(value: Instance) -> Self {
-//         Self::Instance
-//     }
-// }
+/// Generates a trivial `From` trait impl.
+/// Name of the variant and the name of the type contained inside
+/// the variant must be the same.
+macro_rules! objectkind_gen_from {
+    ($variant:ident) => {
+        impl From<$variant> for ObjectKind {
+            fn from(param: $variant) -> Self {
+                Self::$variant(param)
+            }
+        }
+    };
+}
+
+objectkind_gen_from!(Instance);
+objectkind_gen_from!(Class);
+objectkind_gen_from!(UpValue);
+objectkind_gen_from!(Function);
+objectkind_gen_from!(Closure);
+objectkind_gen_from!(Native);
 
 impl From<String> for ObjectKind {
     fn from(lexeme: String) -> Self {
@@ -90,35 +106,12 @@ impl From<String> for ObjectKind {
     }
 }
 
-impl From<UpValue> for ObjectKind {
-    fn from(value: UpValue) -> Self {
-        Self::UpValue(value)
-    }
-}
-impl From<Function> for ObjectKind {
-    fn from(value: Function) -> Self {
-        Self::Function(value)
-    }
-}
-
-impl From<Closure> for ObjectKind {
-    fn from(value: Closure) -> Self {
-        Self::Closure(value)
-    }
-}
-
-impl From<Native> for ObjectKind {
-    fn from(value: Native) -> Self {
-        Self::Native(value)
-    }
-}
-
 impl fmt::Display for ObjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::String(s) => write!(f, "{s}"),
-            Self::Instance => write!(f, "<instance of !>"),
-            Self::Class => write!(f, "<class !>"),
+            Self::Instance(ins) => write!(f, "<instance of {}>", ins.class().name),
+            Self::Class(cls) => write!(f, "<class {}>", cls.name),
             Self::UpValue(uv) => write!(f, "<upvalue at {:?}>", uv.location),
             Self::Function(fun) => write!(f, "<fn {}>", fun.name),
             Self::Closure(clos) => write!(f, "<fn {}>", clos.function().name),
@@ -130,6 +123,25 @@ impl fmt::Display for ObjectKind {
 
 // Lox dynamically allocated object types
 //-----------------------------------------------
+/// Lox class instance
+pub struct Instance {
+    pub class_obj: GcObject,
+    pub fields: Table<Value>,
+}
+
+/// Lox class object
+pub struct Class {
+    pub name: GcObject,
+}
+
+pub struct UpValue {
+    /// Points to the stack slot for open-upvalue(variable is still in scope),
+    /// and to its `value` field for closed-upvalue(variable has gone out of scope).
+    /// For ensuring its validity call the `close()` method before popping off the
+    /// variable from the VM stack(that is, before `location` get invalidated).
+    pub location: *mut Value,
+    pub value: Value,
+}
 
 /// Lox function object
 pub struct Function {
@@ -155,13 +167,23 @@ pub struct Native {
     pub arity: u32,
 }
 
-pub struct UpValue {
-    /// Points to the stack slot for open-upvalue(variable is still in scope),
-    /// and to its `value` field for closed-upvalue(variable has gone out of scope).
-    /// For ensuring its validity call the `close()` method before popping off the
-    /// variable from the VM stack(that is, before `location` get invalidated).
-    pub location: *mut Value,
-    pub value: Value,
+impl Instance {
+    pub fn new(class: GcObject) -> Self {
+        Self {
+            class_obj: class,
+            fields: Table::new(),
+        }
+    }
+
+    pub fn class(&self) -> &Class {
+        obj_as!(Class from self.class_obj)
+    }
+}
+
+impl Class {
+    pub fn new(name: GcObject) -> Self {
+        Self { name }
+    }
 }
 
 impl UpValue {
