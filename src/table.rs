@@ -17,6 +17,7 @@ pub struct Table<T> {
     count: usize,
     /// Counts the number of filled buckets
     filled_count: usize,
+    // _dummy: usize, // Just here
 }
 
 /// Iterator for iterating over the table entries in a mutable way
@@ -73,6 +74,7 @@ impl<T> Table<T> {
             buckets: vec![],
             count: 0,
             filled_count: 0,
+            // _dummy: 0,
         }
     }
 
@@ -162,7 +164,7 @@ impl<T> Table<T> {
         }
 
         let hash = hash_string(string);
-        let mut index = hash as usize % self.capacity();
+        let mut index = self.wrap_index(hash as usize);
 
         loop {
             match &self.buckets[index] {
@@ -181,7 +183,7 @@ impl<T> Table<T> {
                 _ => (),
             }
 
-            index = (index + 1) % self.capacity();
+            index = self.wrap_index(index + 1);
         }
     }
 
@@ -194,7 +196,7 @@ impl<T> Table<T> {
     fn entry_index(&self, key: GcObject) -> usize {
         assert!(self.capacity() != 0);
 
-        let mut index = key.hash as usize % self.capacity();
+        let mut index = self.wrap_index(key.hash as usize);
         let mut tombstone: Option<usize> = None;
 
         loop {
@@ -212,13 +214,15 @@ impl<T> Table<T> {
                 Bucket::Deleted => tombstone = Some(index),
             }
 
-            index = (index + 1) % self.capacity();
+            index = self.wrap_index(index + 1);
         }
     }
 
     /// Rebuilds the table with the given capacity(number of buckets).
     /// capacity must not be less than the number of items in the table.
     fn adjust_capacity(&mut self, capacity: usize) {
+        assert!(capacity.is_power_of_two());
+
         // Allocate a new table and swap it with the old table.
         // We need the contents of the old table for building the new table
         let mut entries: Vec<Bucket<T>> = Vec::with_capacity(capacity);
@@ -242,6 +246,12 @@ impl<T> Table<T> {
     #[inline]
     fn capacity(&self) -> usize {
         self.buckets.len()
+    }
+
+    /// Computes `index % capacity` efficiently
+    #[inline(always)]
+    fn wrap_index(&self, index: usize) -> usize {
+        index & (self.capacity() - 1)
     }
 }
 
