@@ -6,10 +6,14 @@ pub type NativeResult = Result<Value, &'static str>;
 pub type NativeFunction = fn(&mut GarbageCollector, &mut [Value]) -> NativeResult;
 
 /// Native functions list: (name, function, arity)
-pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 3] = [
+pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 7] = [
     ("clock", clock, 0),
     ("sleep", sleep, 1),
     ("string", string, 1),
+    ("hasattr", hasattr, 2),
+    ("getattr", getattr, 2),
+    ("setattr", setattr, 3),
+    ("delattr", delattr, 2),
 ];
 
 // TODO refactor to make arguments passed more explicit and extracting them less verbose.
@@ -41,4 +45,64 @@ fn string(gc: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
 
     let object = gc.create_object(ObjectKind::from(args[0].to_string()));
     Ok(Value::Object(object))
+}
+
+macro_rules! extract_attr_args {
+    ($args_slice:ident) => {{
+        let field = $args_slice[1];
+        let instance = $args_slice[0].as_instance();
+
+        if instance.is_err() {
+            return Err("First argument should be a class instance.");
+        }
+        if !field.is_string() {
+            return Err("Second argument to should be a string.");
+        }
+
+        let field = if let Value::Object(obj) = field {
+            obj
+        } else {
+            unreachable!()
+        };
+
+        (instance.unwrap(), field)
+    }};
+}
+
+fn hasattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 2);
+    let (instance, field) = extract_attr_args!(args);
+
+    Ok(Value::Boolean(instance.fields.find(field).is_some()))
+}
+
+fn getattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 2);
+    let (instance, field) = extract_attr_args!(args);
+
+    if let Some(value) = instance.fields.find(field) {
+        Ok(*value)
+    } else {
+        Err("No such field.")
+    }
+}
+
+fn setattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 3);
+    let value = args[2];
+    let (instance, field) = extract_attr_args!(args);
+
+    instance.fields.insert(field, value);
+    Ok(value)
+}
+
+fn delattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 2);
+    let (instance, field) = extract_attr_args!(args);
+
+    if instance.fields.delete(field) {
+        Ok(Value::Nil)
+    } else {
+        Err("Instance has no such attribute.")
+    }
 }
