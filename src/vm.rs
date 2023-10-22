@@ -67,6 +67,8 @@ pub struct VM {
     /// an open-upvalue is transformed to a closed-upvalue.
     /// Stores `location` and the associated upvalue as `GcObject`.
     pub open_upvalues: BTreeMap<*const Value, GcObject>,
+    /// Name of the method used as a constructor
+    pub init_string: GcObject,
     /// VM's mark and sweep garbage collector
     gc: GarbageCollector,
 }
@@ -128,8 +130,10 @@ impl VM {
             globals: Table::new(),
             open_upvalues: BTreeMap::new(),
             gc: GarbageCollector::new(),
+            init_string: GcObject::invalid(),
         };
 
+        ret.init_string = ret.gc.intern_string("init".to_string());
         ret.define_native();
         ret
     }
@@ -411,7 +415,7 @@ impl VM {
                 // So the arguments start from slot one.
                 OpCode::Call => {
                     let arg_count = self.read_operand(is_long);
-                    // The function object is before the arguments on stack.s
+                    // The callable object is before the arguments on the stack.
                     // It is popped after the function call finishes
                     self.call_value(self.peek(arg_count), arg_count)?;
                 }
@@ -571,10 +575,19 @@ impl VM {
     fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
         if let Value::Object(object) = callee {
             match &object.kind {
-                ObjectKind::Class(_) => {
-                    self.stack.set_len(self.stack.len() - arg_count - 1);
+                ObjectKind::Class(cls) => {
                     let instance = self.gc.create_object(Instance::new(object).into());
-                    self.push(Value::Object(instance));
+                    // Replace the class object with the instance which `this` should resolve to.
+                    let new_fp = self.stack.len() - arg_count - 1;
+                    self.stack[new_fp] = instance.into();
+
+                    // If initializer exists then call it, otherwise leave the instance blank.
+                    if let Some(&init) = cls.methods.find(self.init_string) {
+                        return self.call_closure(init, arg_count);
+                    } else if arg_count != 0 {
+                        return self.error(&format!("Expected 0 arguments but got {arg_count}."));
+                    }
+
                     Ok(())
                 }
                 ObjectKind::BoundMethod(meth) => {
@@ -668,7 +681,7 @@ impl VM {
                 .into(),
             );
             let name = self.gc.intern_string(name.to_string());
-            self.globals.insert(name, Value::Object(function));
+            self.globals.insert(name, function.into());
         }
     }
 

@@ -282,6 +282,7 @@ impl GarbageCollector {
             self.tracer.mark_object(frame.closure_obj);
         }
 
+        self.tracer.mark_object(vm.init_string);
         // The interned string table is assumed to contain weak references
         // to string objects, so we do not treat them as roots.
     }

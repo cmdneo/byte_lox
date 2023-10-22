@@ -32,12 +32,14 @@ impl Loop {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum FunctionType {
     /// Ordinary function
     Function,
     /// Class method
     Method,
+    /// Class constructor
+    Initializer,
     /// Top-level
     Script,
 }
@@ -88,10 +90,12 @@ struct Context {
     locals: Vec<Local>,
     /// Tracks free variables for closure support
     upvalues: Vec<Upvalue>,
+    /// Type of the function
+    kind: FunctionType,
 }
 
 impl Context {
-    fn new(name: GcObject, scope_depth: i16) -> Self {
+    fn new(name: GcObject, scope_depth: i16, kind: FunctionType) -> Self {
         Self {
             ident_index_table: Table::new(),
             function: Function::named(name),
@@ -99,6 +103,7 @@ impl Context {
             // Rarely we have more than 8 local variables
             locals: Vec::with_capacity(8),
             upvalues: Vec::new(),
+            kind,
         }
     }
 
@@ -217,7 +222,7 @@ impl<'a> Parser<'a> {
     /// Push a new parsing context
     fn push_context(&mut self, name: GcObject, kind: FunctionType) {
         let last_depth = self.contexts.last().map_or(0, |ctx| ctx.scope_depth);
-        self.contexts.push(Context::new(name, last_depth));
+        self.contexts.push(Context::new(name, last_depth, kind));
 
         // Slot zero of every function's stack frame is reserved for internal use. See below.
         let mut reserved = Token::default();
@@ -242,9 +247,9 @@ impl<'a> Parser<'a> {
         self.emit_opcode(OpCode::Return);
 
         if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
-            let name = self.context_const().function.name.to_string();
-            let name = if name == "<script>" {
-                name
+            let name = self.context_const().function.name;
+            let name = if self.context_const().kind == FunctionType::Script {
+                format!("<script>")
             } else {
                 format!("<fn {}>", name)
             };
@@ -427,15 +432,29 @@ impl<'a> Parser<'a> {
             self.error("Cannot return from top-level code.");
         }
 
+        let is_init = self.context().kind == FunctionType::Initializer;
+
+        // Class constructors(`init` methods) cannot explicitly return any value.
+        // Only a `return;` without any value is permitted if required.
+        // If a `return <expr>;` is present inside of an init method then it is an error.
+        // So, for them we implicitly return the instance bound, that is `this`.
+        // The `this` is always a local variable stored at the begining of its call frame.
         if self.match_it(TokenKind::Semicolon) {
-            self.emit_opcode(OpCode::Nil);
-            self.emit_opcode(OpCode::Return);
+            if is_init {
+                self.emit_with_operand(OpCode::GetLocal, 0);
+            } else {
+                // If no value provided return implicitly returns nil.
+                self.emit_opcode(OpCode::Nil);
+            }
         } else {
+            if is_init {
+                self.error("Cannot return a value from an initializer.");
+            }
             self.expression()?;
             self.consume(TokenKind::Semicolon, "Expect ';' after return value.")?;
-            self.emit_opcode(OpCode::Return);
         }
 
+        self.emit_opcode(OpCode::Return);
         Ok(())
     }
 
@@ -854,7 +873,11 @@ impl<'a> Parser<'a> {
         let name = self.consume(TokenKind::Identifier, "Expect method name.")?;
         let name_idx = self.add_identifier_constant(&name);
 
-        self.function(FunctionType::Method)?;
+        if self.get_lexeme(&name) == "init" {
+            self.function(FunctionType::Initializer)?;
+        } else {
+            self.function(FunctionType::Method)?;
+        }
         self.emit_with_operand(OpCode::Method, name_idx);
 
         Ok(())
