@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
         // may or may not be in the stream and we are not going to search for that.
         // We just set `kind` to `TokenKind::This` to represent that special value.
         // If not a method then we leave that variable's name empty, so it can never be referenced.
-        if kind == FunctionType::Method {
+        if matches!(kind, FunctionType::Method | FunctionType::Initializer) {
             reserved.kind = TokenKind::This;
         };
         self.context()
@@ -243,8 +243,7 @@ impl<'a> Parser<'a> {
 
     /// Pop the current parsing context and return the generated function object
     fn pop_context(&mut self, arity: u32) -> Context {
-        self.emit_opcode(OpCode::Nil);
-        self.emit_opcode(OpCode::Return);
+        self.emit_return();
 
         if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
             let name = self.context_const().function.name;
@@ -432,29 +431,22 @@ impl<'a> Parser<'a> {
             self.error("Cannot return from top-level code.");
         }
 
-        let is_init = self.context().kind == FunctionType::Initializer;
-
         // Class constructors(`init` methods) cannot explicitly return any value.
         // Only a `return;` without any value is permitted if required.
         // If a `return <expr>;` is present inside of an init method then it is an error.
         // So, for them we implicitly return the instance bound, that is `this`.
         // The `this` is always a local variable stored at the begining of its call frame.
         if self.match_it(TokenKind::Semicolon) {
-            if is_init {
-                self.emit_with_operand(OpCode::GetLocal, 0);
-            } else {
-                // If no value provided return implicitly returns nil.
-                self.emit_opcode(OpCode::Nil);
-            }
+            self.emit_return();
         } else {
-            if is_init {
+            if self.context().kind == FunctionType::Initializer {
                 self.error("Cannot return a value from an initializer.");
             }
             self.expression()?;
             self.consume(TokenKind::Semicolon, "Expect ';' after return value.")?;
+            self.emit_opcode(OpCode::Return);
         }
 
-        self.emit_opcode(OpCode::Return);
         Ok(())
     }
 
@@ -1228,6 +1220,21 @@ impl<'a> Parser<'a> {
         self.emit_byte(0xFF);
         self.emit_byte(0xFF);
         self.chunk().code.len() - 2
+    }
+
+    /// Emits return when no expression is present after return. That is `return;`
+    fn emit_return(&mut self) {
+        // For class constructors(init method) a `return;` without any value is
+        // permitted if required. That implicitly returns the class instance referenced
+        // by `this` stored in slot zero of the call frame.
+        // In other cases we just return nil.
+        if self.context().kind == FunctionType::Initializer {
+            self.emit_with_operand(OpCode::GetLocal, 0);
+        } else {
+            self.emit_opcode(OpCode::Nil);
+        }
+
+        self.emit_opcode(OpCode::Return);
     }
 
     /// Sets the jump offset to point to the just next opcode to be emitted.
