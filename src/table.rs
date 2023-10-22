@@ -109,6 +109,10 @@ impl<T> Table<T> {
     /// NOTE: Deleting entries does not lower the load factor of the table due to
     /// implementation constraints. So use the delete operation sparingly.
     pub fn delete(&mut self, key: GcObject) -> bool {
+        if self.capacity() == 0 {
+            return false;
+        }
+
         // We do not consider Deleted entries(tombstones) empty buckets,
         // therefore, we do not reduce the count after deleting an entry.
         let index = self.entry_index(key);
@@ -188,7 +192,7 @@ impl<T> Table<T> {
 
     /// Returns the index of the corresponding bucket for the entry
     fn entry_index(&self, key: GcObject) -> usize {
-        debug_assert!(self.capacity() != 0);
+        assert!(self.capacity() != 0);
 
         let mut index = key.hash as usize % self.capacity();
         let mut tombstone: Option<usize> = None;
