@@ -62,10 +62,11 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         Jump => jump_instruction("JUMP", chunk, offset, 1),
         Loop => jump_instruction("LOOP", chunk, offset, -1),
         Call => operand("CALL", chunk, offset),
+        Invoke => invoke_instruction("INVOKE", chunk, offset),
 
         Closure => {
             constant("CLOSURE", chunk, offset);
-            let (operand, offset) = read_operand(chunk, offset);
+            let (operand, offset) = read_operand_for(chunk, offset);
 
             let upvalue_count = if let Value::Object(obj) = chunk.constants[operand] {
                 obj_as!(Function from obj).upvalue_count as usize
@@ -118,7 +119,7 @@ fn simple(name: &str, offset: usize) -> usize {
 /// Print the opcode along with its associated constant stored in the chunk's
 /// constant table which is indicated by opcode's operand bytes
 fn constant(name: &str, chunk: &Chunk, offset: usize) -> usize {
-    let (operand, offset) = read_operand(chunk, offset);
+    let (operand, offset) = read_operand_for(chunk, offset);
     eprintln!("{name:-16} {operand:4} '{}'", chunk.constants[operand]);
 
     offset
@@ -126,9 +127,22 @@ fn constant(name: &str, chunk: &Chunk, offset: usize) -> usize {
 
 /// Print the opcode along with its operand bytes
 fn operand(name: &str, chunk: &Chunk, offset: usize) -> usize {
-    let (operand, offset) = read_operand(chunk, offset);
+    let (operand, offset) = read_operand_for(chunk, offset);
     eprintln!("{name:-16} {operand:4}");
 
+    offset
+}
+
+fn invoke_instruction(name: &str, chunk: &Chunk, offset: usize) -> usize {
+    let is_long = chunk.code[offset] >> 7 == 1;
+    let offset = offset + 1;
+    let (name_idx, offset) = read_operand(chunk, offset, is_long);
+    let (arg_count, offset) = read_operand(chunk, offset, is_long);
+
+    eprintln!(
+        "{name:-16} ({arg_count} args) {name_idx:4} '{}'",
+        chunk.constants[name_idx]
+    );
     offset
 }
 
@@ -146,18 +160,25 @@ fn jump_instruction(name: &str, chunk: &Chunk, offset: usize, sign: i8) -> usize
     offset + 3
 }
 
-/// Returns the value of operand byte(s) and the new offset as a tuple
-fn read_operand(chunk: &Chunk, offset: usize) -> (usize, usize) {
+/// Returns the value of operand byte(s) for the opcode at current `offset` and
+/// the new offset(after opcode and operand) as a tuple.
+fn read_operand_for(chunk: &Chunk, offset: usize) -> (usize, usize) {
     let is_long = chunk.code[offset] >> 7 == 1;
+    let offset = offset + 1; // Advance past opcode
 
+    read_operand(chunk, offset, is_long)
+}
+
+/// Reads the operand at `offset`` and returns it with the new offset as a tuple.
+fn read_operand(chunk: &Chunk, offset: usize, is_long: bool) -> (usize, usize) {
     if is_long {
         // Long constant has 2-bytes operand
-        let bytes = [chunk.code[offset + 1], chunk.code[offset + 2]];
+        let bytes = [chunk.code[offset], chunk.code[offset + 1]];
         let operand = u16::from_le_bytes(bytes);
-        (operand as usize, offset + 3)
+        (operand as usize, offset + 2)
     } else {
         // Normal constants have 1-byte operand
-        let operand = chunk.code[offset + 1];
-        (operand as usize, offset + 2)
+        let operand = chunk.code[offset];
+        (operand as usize, offset + 1)
     }
 }

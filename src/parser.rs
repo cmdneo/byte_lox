@@ -729,6 +729,10 @@ impl<'a> Parser<'a> {
         if can_assign && self.match_it(TokenKind::Equal) {
             self.expression()?;
             self.emit_with_operand(OpCode::SetProperty, name_idx);
+        } else if self.match_it(TokenKind::LeftParen) {
+            // Combine GetProperty and Call together using Invoke opcode if possible.
+            let arg_count = self.argument_list()?;
+            self.emit_with_operand2(OpCode::Invoke, name_idx, arg_count);
         } else {
             self.emit_with_operand(OpCode::GetProperty, name_idx);
         }
@@ -1159,25 +1163,47 @@ impl<'a> Parser<'a> {
     }
 
     /// Emits an opcode with an operand value after it.
-    /// Additionaly prefixes the opcode with LongOperand if operand cannot
-    /// fit into 1-byte, which indicates a 2-byte operand.
+    /// Additionaly sets MSB of opcode to 1 if the operand cannot
+    /// fit in 1-byte, which indicates a 2-byte operand.
     /// If the operand cannot fit even in 2-bytes then it is an error and panics.
-    fn emit_with_operand(&mut self, opcode: OpCode, operand: u32) -> u32 {
+    fn emit_with_operand(&mut self, opcode: OpCode, operand: u32) {
         let op_bytes = operand.to_le_bytes();
         let line = self.previous.line;
+        let chunk = self.chunk();
 
         if operand <= u8::MAX as u32 {
-            self.chunk().write(opcode as u8, line);
-            self.chunk().write(op_bytes[0], line);
+            chunk.write(opcode as u8, line);
+            chunk.write(op_bytes[0], line);
         } else if operand <= u16::MAX as u32 {
-            self.chunk().write(opcode as u8 | 1u8 << 7, line);
-            self.chunk().write(op_bytes[0], line);
-            self.chunk().write(op_bytes[1], line);
+            chunk.write(opcode as u8 | 1u8 << 7, line);
+            chunk.write(op_bytes[0], line);
+            chunk.write(op_bytes[1], line);
         } else {
             panic!("Index byte too large for OpCode (maximum is {})", u16::MAX);
         }
+    }
 
-        operand
+    /// Same as `emit_with_operand`, except that it supports two operands
+    /// Either both of the operands are of 2-bytes or none of them.
+    fn emit_with_operand2(&mut self, opcode: OpCode, operand1: u32, operand2: u32) {
+        let op1_bytes = operand1.to_le_bytes();
+        let op2_bytes = operand2.to_le_bytes();
+        let line = self.previous.line;
+        let chunk = self.chunk();
+
+        if operand1 <= u8::MAX as u32 && operand2 <= u8::MAX as u32 {
+            chunk.write(opcode as u8, line);
+            chunk.write(op1_bytes[0], line);
+            chunk.write(op2_bytes[0], line);
+        } else if operand1 <= u16::MAX as u32 && operand2 <= u16::MAX as u32 {
+            chunk.write(opcode as u8 | 1u8 << 7, line);
+            chunk.write(op1_bytes[0], line);
+            chunk.write(op1_bytes[1], line);
+            chunk.write(op2_bytes[0], line);
+            chunk.write(op2_bytes[1], line);
+        } else {
+            panic!("Index byte too large for OpCode (maximum is {})", u16::MAX);
+        }
     }
 
     fn emit_loop(&mut self, loop_begin: usize) {

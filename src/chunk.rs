@@ -84,6 +84,11 @@ pub enum OpCode {
     /// Call a value currently on top of the stack.
     /// Its operand contains the number of arguments being passed.
     Call,
+    /// Combines GetProperty and Call, has two operands.
+    /// First : Index of the property name, in chunk's constant table.
+    /// Second: Number of arguments.
+    /// Either both operands are long(2-bytes) or neither, indicated by MSB.
+    Invoke,
 
     /// Creates a closure object by wrapping a function referenced by its
     /// operand which is a constant-table index.

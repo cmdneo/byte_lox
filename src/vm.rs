@@ -416,8 +416,15 @@ impl VM {
                 OpCode::Call => {
                     let arg_count = self.read_operand(is_long);
                     // The callable object is before the arguments on the stack.
-                    // It is popped after the function call finishes
+                    // It is popped after the function call finishes.
                     self.call_value(self.peek(arg_count), arg_count)?;
+                }
+
+                OpCode::Invoke => {
+                    let name = self.read_object(is_long);
+                    let arg_count = self.read_operand(is_long);
+
+                    self.invoke(name, arg_count)?;
                 }
 
                 OpCode::Closure => {
@@ -568,6 +575,41 @@ impl VM {
             let mut uv = uv;
             unsafe { obj_as!(mut UpValue from uv).close() };
             self.open_upvalues.pop_last();
+        }
+    }
+
+    /// Does work for the `Invoke` opcode
+    fn invoke(&mut self, name: GcObject, arg_count: usize) -> InterpretResult {
+        // Invoke is used for code like: object.property(arguments...)
+        // And the stack looks like    : [..., object, arguments...]
+        // The reciever is already on the stack before the arguments.
+        let mut reciever = self.peek(arg_count);
+        let instance = if let Ok(ins) = reciever.as_instance() {
+            ins
+        } else {
+            return self.error("Only instances have methods.");
+        };
+
+        // Fields take priority over methods, therefore, we check if a field with the same name exist.
+        if let Some(&field) = instance.fields.find(name) {
+            let new_fp = self.stack.len() - arg_count - 1;
+            self.stack[new_fp] = field;
+            self.call_value(field, arg_count)
+        } else {
+            self.invoke_from_class(instance.class(), name, arg_count)
+        }
+    }
+
+    fn invoke_from_class(
+        &mut self,
+        class: &Class,
+        name: GcObject,
+        arg_count: usize,
+    ) -> InterpretResult {
+        if let Some(&method) = class.methods.find(name) {
+            self.call_closure(method, arg_count)
+        } else {
+            self.error(&format!("Undefined property '{name}'"))
         }
     }
 
