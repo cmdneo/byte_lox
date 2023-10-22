@@ -95,19 +95,13 @@ impl CallFrame {
         }
     }
 
+    fn dummy(gc: &mut GarbageCollector) -> Self {
+        Self::new(gc.intern_string("<dummy-frame>".to_string()), null(), 0)
+    }
+
     #[inline(always)]
     fn closure(&self) -> &Closure {
         obj_as!(Closure from self.closure_obj)
-    }
-}
-
-impl Default for CallFrame {
-    fn default() -> Self {
-        Self {
-            closure_obj: GcObject::invalid(),
-            ip: null(),
-            fp: 0,
-        }
     }
 }
 
@@ -122,18 +116,18 @@ impl Default for VM {
 impl VM {
     /// Creates a new VM.
     pub fn new() -> Self {
+        let mut gc = GarbageCollector::new();
+
         let mut ret = Self {
             stack: Stack::new(),
             call_frames: Stack::new(),
-            // Put a dummy frame as now no code is being executed
-            frame: CallFrame::default(),
+            frame: CallFrame::dummy(&mut gc), // Put a dummy frame, no code is being executed
             globals: Table::new(),
             open_upvalues: BTreeMap::new(),
-            gc: GarbageCollector::new(),
-            init_string: GcObject::invalid(),
+            init_string: gc.intern_string("init".to_string()),
+            gc,
         };
 
-        ret.init_string = ret.gc.intern_string("init".to_string());
         ret.define_native();
         ret
     }
@@ -526,7 +520,7 @@ impl VM {
             print_frame(&self.call_frames[i], d + 1);
         }
 
-        self.frame = CallFrame::default();
+        self.frame = CallFrame::dummy(&mut self.gc);
         self.reset_stacks();
         self.gc.stop();
         Err(InterpretError::Runtime)
