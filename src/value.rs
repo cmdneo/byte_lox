@@ -37,11 +37,11 @@ impl Value {
     }
 
     #[inline]
-    pub fn is_instance(&self) -> bool {
+    pub fn as_object(&self) -> Result<GcObject, ()> {
         if let Value::Object(obj) = self {
-            matches!(obj.kind, ObjectKind::Instance(_))
+            Ok(*obj)
         } else {
-            false
+            Err(())
         }
     }
 

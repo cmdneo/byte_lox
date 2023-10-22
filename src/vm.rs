@@ -598,7 +598,7 @@ impl VM {
         }
 
         let len = self.stack.len();
-        let args = self.stack.window(len - arg_count, len);
+        let args = self.stack.window_mut(len - arg_count, len);
 
         let ret_value = match (native.function)(&mut self.gc, args) {
             Ok(value) => value,
@@ -728,13 +728,5 @@ impl VM {
 
     fn stack_apply(&mut self, func: impl FnOnce(Value) -> Value) {
         *self.stack.top_mut() = func(self.stack.top_mut().clone());
-    }
-}
-
-fn value_to_object(value: Value) -> Option<GcObject> {
-    if let Value::Object(obj) = value {
-        Some(obj)
-    } else {
-        None
     }
 }

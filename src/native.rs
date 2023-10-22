@@ -3,7 +3,7 @@ use std::{thread, time};
 use crate::{garbage::GarbageCollector, object::ObjectKind, value::Value};
 
 pub type NativeResult = Result<Value, &'static str>;
-pub type NativeFunction = fn(&mut GarbageCollector, &[Value]) -> NativeResult;
+pub type NativeFunction = fn(&mut GarbageCollector, &mut [Value]) -> NativeResult;
 
 /// Native functions list: (name, function, arity)
 pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 3] = [
@@ -12,7 +12,9 @@ pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 3] = [
     ("string", string, 1),
 ];
 
-fn clock(_: &mut GarbageCollector, args: &[Value]) -> NativeResult {
+// TODO refactor to make arguments passed more explicit and extracting them less verbose.
+
+fn clock(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 0);
 
     let sec = time::SystemTime::now()
@@ -23,7 +25,7 @@ fn clock(_: &mut GarbageCollector, args: &[Value]) -> NativeResult {
     Ok(Value::Number(sec))
 }
 
-fn sleep(_: &mut GarbageCollector, args: &[Value]) -> NativeResult {
+fn sleep(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 1);
 
     if let Value::Number(time) = args[0] {
@@ -34,7 +36,7 @@ fn sleep(_: &mut GarbageCollector, args: &[Value]) -> NativeResult {
     }
 }
 
-fn string(gc: &mut GarbageCollector, args: &[Value]) -> NativeResult {
+fn string(gc: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 1);
 
     let object = gc.create_object(ObjectKind::from(args[0].to_string()));

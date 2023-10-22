@@ -58,6 +58,17 @@ impl<T, const CAP: usize> Stack<T, CAP> {
         unsafe { std::mem::transmute::<&[MaybeUninit<T>], &[T]>(&self.array[start..end]) }
     }
 
+    /// Returns a mut slice of stack
+    pub fn window_mut(&mut self, start: usize, end: usize) -> &mut [T] {
+        debug_assert!(start <= end);
+        debug_assert!(end <= self.sp);
+
+        // Everything before self.sp is initialized, and range is left inclusive only.
+        unsafe {
+            std::mem::transmute::<&mut [MaybeUninit<T>], &mut [T]>(&mut self.array[start..end])
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.sp
     }
