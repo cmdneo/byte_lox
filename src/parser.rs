@@ -131,6 +131,8 @@ pub struct Parser<'a> {
     contexts: Vec<Context>,
     /// Loop info for creating jump opcodes for `break` and `continue`
     loops: Vec<Loop>,
+    /// Counts the number of classes we are nested inside currently
+    class_depth: u32,
     /// For allocating objects generated during compilation to bytecode
     gc: &'a mut GarbageCollector,
     /// Internal error state tracker
@@ -176,6 +178,7 @@ impl<'a> Parser<'a> {
             source,
             contexts: Vec::with_capacity(4),
             loops: Vec::with_capacity(4),
+            class_depth: 0,
             gc,
             had_error: RefCell::new(false),
         }
@@ -216,10 +219,21 @@ impl<'a> Parser<'a> {
         let last_depth = self.contexts.last().map_or(0, |ctx| ctx.scope_depth);
         self.contexts.push(Context::new(name, last_depth));
 
-        // Slot zero of every function's stack frame is reserved for internal use.
-        // TODO Add support for resolving this.
-        let local = Local::new(Token::default(), 0, false);
-        self.context().locals.push(local);
+        // Slot zero of every function's stack frame is reserved for internal use. See below.
+        let mut reserved = Token::default();
+
+        // If the function being parsed is a class method then we store the associated instance
+        // in slot zero, which is referenced by using the `this` keyword.
+        // Use a special Token value to represent the `this` token, since it
+        // may or may not be in the stream and we are not going to search for that.
+        // We just set `kind` to `TokenKind::This` to represent that special value.
+        // If not a method then we leave that variable's name empty, so it can never be referenced.
+        if kind == FunctionType::Method {
+            reserved.kind = TokenKind::This;
+        };
+        self.context()
+            .locals
+            .push(Local::new(reserved, last_depth, false));
     }
 
     /// Pop the current parsing context and return the generated function object
@@ -285,6 +299,8 @@ impl<'a> Parser<'a> {
         // A class can refer itself inside itself
         self.define_variable(name_idx);
 
+        self.class_depth += 1;
+
         // We need to access the class object created to bind method to it.
         // So, we push that class object onto the stack.
         self.named_variable(&name, false)?;
@@ -295,6 +311,7 @@ impl<'a> Parser<'a> {
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.")?;
         self.emit_opcode(OpCode::Pop); // Pop the class object.
 
+        self.class_depth -= 1;
         Ok(())
     }
 
@@ -744,6 +761,9 @@ impl<'a> Parser<'a> {
     }
 
     fn this(&mut self) -> ParseResult {
+        if self.class_depth == 0 {
+            self.error("Cannot use 'this' outside of a class.");
+        }
         self.variable(false)?;
         Ok(())
     }
@@ -982,6 +1002,13 @@ impl<'a> Parser<'a> {
         // Walk backwards to allow variables in the inner scope to shadow the
         // variables in the outer scopes.
         for (i, local) in context.locals.iter().enumerate().rev() {
+            // The `this`token is represented by a special value of token where
+            // kind of the token should be `TokenKind::This`.
+            // So, we need to check for it seperately.
+            if name.kind == TokenKind::This && local.name.kind == TokenKind::This {
+                return Some(i as u32);
+            }
+
             if self.get_lexeme(&local.name) == self.get_lexeme(name) {
                 // If the local is in an uninitialized state
                 if local.depth == -1 {

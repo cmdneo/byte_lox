@@ -579,7 +579,8 @@ impl VM {
                 }
                 ObjectKind::BoundMethod(meth) => {
                     // Replace the method object with the instance which `this` should resolve to.
-                    self.stack[self.frame.fp] = meth.reciever;
+                    let new_fp = self.stack.len() - arg_count - 1;
+                    self.stack[new_fp] = meth.reciever;
                     self.call_closure(meth.method, arg_count)
                 }
                 ObjectKind::Native(fun) => self.call_native(fun, arg_count),
