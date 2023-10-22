@@ -27,6 +27,7 @@ pub enum OpCode {
     /// Pops a value off the stack
     Pop,
 
+    // These opcodes have a single operand refering to the variable
     /// Defines a global
     DefineGlobal,
     /// Get a global
@@ -45,7 +46,6 @@ pub enum OpCode {
     GetProperty,
     /// Set property value
     SetProperty,
-    
 
     // Equality operators, work on all types
     Equal,
@@ -92,12 +92,16 @@ pub enum OpCode {
     /// Vector elements are of 3-bytes each:
     /// - is_local      \[1-byte]
     /// - upvalue_index \[2-bytes]
+    /// The closure object is left on stack top after creation.
     Closure,
     /// Converts an open upvalue to closed upvalue
     CloseUpvalue,
 
-    /// Create a class object
+    /// Creates a class object and bind it to the name referred by its operand.
     Class,
+    /// Binds a closure object to a class as its method,
+    /// operand refers the the method's name.
+    Method,
 
     /// Return from a procedure.
     Return,

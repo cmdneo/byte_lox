@@ -16,7 +16,9 @@ use crate::{
     compiler, debug,
     garbage::GarbageCollector,
     native,
-    object::{obj_as, Class, Closure, GcObject, Instance, Native, ObjectKind, UpValue},
+    object::{
+        obj_as, BoundMethod, Class, Closure, GcObject, Instance, Native, ObjectKind, UpValue,
+    },
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -75,7 +77,7 @@ pub enum InterpretError {
 }
 
 pub struct CallFrame {
-    closure_ptr: *const Closure,
+    pub closure_obj: GcObject,
     /// Instruction pointer
     ip: *const u8,
     /// Frame/base pointer
@@ -83,26 +85,24 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
-    fn new(closure: *const Closure, ip: *const u8, fp: usize) -> Self {
+    fn new(closure: GcObject, ip: *const u8, fp: usize) -> Self {
         Self {
-            closure_ptr: closure,
+            closure_obj: closure,
             ip,
             fp,
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn closure(&self) -> &Closure {
-        // The closure object resides on the value stack
-        // as long as the call frame is active it is safe.
-        unsafe { &*(self.closure_ptr) }
+        obj_as!(Closure from self.closure_obj)
     }
 }
 
 impl Default for CallFrame {
     fn default() -> Self {
         Self {
-            closure_ptr: null(),
+            closure_obj: GcObject::invalid(),
             ip: null(),
             fp: 0,
         }
@@ -266,18 +266,21 @@ impl VM {
 
                 OpCode::GetProperty => {
                     let name = self.read_object(is_long);
-                    let mut instance = self.peek(0);
+                    let mut instance = self.peek(0); // Maybe instance
                     let instance = if let Ok(ins) = instance.as_instance() {
                         ins
                     } else {
                         return self.error("Only instances have fields.");
                     };
 
+                    // Fields take priority over method
                     if let Some(&value) = instance.fields.find(name) {
                         self.pop(); // Instance
                         self.push(value);
                     } else {
-                        return self.error(&format!("Undefined property '{name}'."));
+                        let meth = self.bind_method(instance.class_obj, name)?;
+                        self.pop(); // Instance
+                        self.push(Value::Object(meth));
                     }
                 }
 
@@ -454,6 +457,18 @@ impl VM {
                     self.push(Value::Object(class));
                 }
 
+                OpCode::Method => {
+                    let meth_name = self.read_object(is_long);
+                    let meth = self.peek(0).as_object().unwrap();
+                    self.peek(1)
+                        .as_class()
+                        .unwrap()
+                        .methods
+                        .insert(meth_name, meth);
+
+                    self.pop();
+                }
+
                 OpCode::Return => {
                     let result = self.pop();
                     // Close upvalues as before discarding a frame, as
@@ -508,6 +523,24 @@ impl VM {
 
     // Execution operation methods
     //-----------------------------------------------------
+    /// Binds the method(named `name`) if found and returns the newly created
+    /// `BoundMethod` object. It is bound to the value present on stack top.
+    fn bind_method(&mut self, class: GcObject, name: GcObject) -> Result<GcObject, InterpretError> {
+        let mut class = class;
+        let class = obj_as!(mut Class from class);
+
+        if let Some(&method) = class.methods.find(name) {
+            let reciever = self.peek(0);
+            let ret = self
+                .gc
+                .create_object(BoundMethod::new(reciever, method).into());
+            Ok(ret)
+        } else {
+            self.error(&format!("Undefined property '{name}'."))?;
+            unreachable!();
+        }
+    }
+
     /// Creates(if does not exist for the local) an upvalue and returns it.
     fn create_upvalue(&mut self, local: *mut Value) -> GcObject {
         if let Some(&uv) = self.open_upvalues.get(&(local as *const Value)) {
@@ -544,8 +577,13 @@ impl VM {
                     self.push(Value::Object(instance));
                     Ok(())
                 }
+                ObjectKind::BoundMethod(meth) => {
+                    // Replace the method object with the instance which `this` should resolve to.
+                    self.stack[self.frame.fp] = meth.reciever;
+                    self.call_closure(meth.method, arg_count)
+                }
                 ObjectKind::Native(fun) => self.call_native(fun, arg_count),
-                ObjectKind::Closure(clos) => self.call_closure(clos, arg_count),
+                ObjectKind::Closure(_) => self.call_closure(object, arg_count),
                 _ => self.error("Can only call functions and classes."),
             }
         } else {
@@ -553,7 +591,8 @@ impl VM {
         }
     }
 
-    fn call_closure(&mut self, closure: &Closure, arg_count: usize) -> InterpretResult {
+    fn call_closure(&mut self, object: GcObject, arg_count: usize) -> InterpretResult {
+        let closure = obj_as!(Closure from object);
         let function = closure.function();
 
         // Last opcode must be RETURN, otherwise it will cause UB(out-of-bounds)
@@ -580,7 +619,7 @@ impl VM {
             &mut self.frame,
             // The arguments plus the function object (in slot zero of frame)
             CallFrame::new(
-                closure,
+                object,
                 function.chunk.code.as_ptr(),
                 self.stack.len() - arg_count - 1,
             ),

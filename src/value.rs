@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, fmt, ops};
 
-use crate::object::{GcObject, Instance, ObjectKind};
+use crate::object::{Class, GcObject, Instance, ObjectKind};
 
 /// The Lox dynamic value type.
 /// All operations on values must be type checked before
@@ -28,6 +28,19 @@ impl Value {
         if let Value::Object(obj) = self {
             if let ObjectKind::Instance(ins) = &mut obj.kind {
                 Ok(ins)
+            } else {
+                Err(())
+            }
+        } else {
+            Err(())
+        }
+    }
+
+    #[inline]
+    pub fn as_class(&mut self) -> Result<&mut Class, ()> {
+        if let Value::Object(obj) = self {
+            if let ObjectKind::Class(cls) = &mut obj.kind {
+                Ok(cls)
             } else {
                 Err(())
             }

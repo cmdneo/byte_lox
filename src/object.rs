@@ -65,6 +65,7 @@ pub enum ObjectKind {
     UpValue(UpValue),
     Function(Function),
     Closure(Closure),
+    BoundMethod(BoundMethod),
     Native(Native),
     Invalid,
 }
@@ -98,6 +99,7 @@ objectkind_gen_from!(Class);
 objectkind_gen_from!(UpValue);
 objectkind_gen_from!(Function);
 objectkind_gen_from!(Closure);
+objectkind_gen_from!(BoundMethod);
 objectkind_gen_from!(Native);
 
 impl From<String> for ObjectKind {
@@ -115,6 +117,11 @@ impl fmt::Display for ObjectKind {
             Self::UpValue(uv) => write!(f, "<upvalue at {:?}>", uv.location),
             Self::Function(fun) => write!(f, "<fn {}>", fun.name),
             Self::Closure(clos) => write!(f, "<fn {}>", clos.function().name),
+            Self::BoundMethod(meth) => write!(
+                f,
+                "<bound method {}>",
+                obj_as!(Closure from meth.method).function().name
+            ),
             Self::Native(fun) => write!(f, "<native fn {}>", fun.name),
             Self::Invalid => unreachable!(),
         }
@@ -132,6 +139,7 @@ pub struct Instance {
 /// Lox class object
 pub struct Class {
     pub name: GcObject,
+    pub methods: Table<GcObject>,
 }
 
 pub struct UpValue {
@@ -159,6 +167,14 @@ pub struct Closure {
     pub upvalues: Box<[GcObject]>,
 }
 
+/// Method that is bound to a specific class instance.
+/// It keeps track of from which instance it was accessed.
+// `this` is used to access that bound instance.
+pub struct BoundMethod {
+    pub reciever: Value,
+    pub method: GcObject,
+}
+
 /// Native functions object, for calling built-in functions
 pub struct Native {
     // Native function names are fixed
@@ -182,7 +198,10 @@ impl Instance {
 
 impl Class {
     pub fn new(name: GcObject) -> Self {
-        Self { name }
+        Self {
+            name,
+            methods: Table::new(),
+        }
     }
 }
 
@@ -231,5 +250,12 @@ impl Closure {
     #[inline]
     pub fn function(&self) -> &Function {
         obj_as!(Function from self.function_obj)
+    }
+}
+
+impl BoundMethod {
+    pub fn new(reciever: Value, method: GcObject) -> Self {
+        debug_assert!(matches!(method.kind, ObjectKind::Closure(_)));
+        Self { reciever, method }
     }
 }

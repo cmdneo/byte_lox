@@ -91,6 +91,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         CloseUpvalue => simple("CLOSE_UPVALUE", offset),
 
         Class => constant("CLASS", chunk, offset),
+        Method => constant("METHOD", chunk, offset),
 
         Return => simple("RETURN", offset),
     }

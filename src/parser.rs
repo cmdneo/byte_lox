@@ -32,6 +32,16 @@ impl Loop {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum FunctionType {
+    /// Ordinary function
+    Function,
+    /// Class method
+    Method,
+    /// Top-level
+    Script,
+}
+
 /// Stores a local variable
 pub struct Local {
     pub name: Token,
@@ -178,7 +188,7 @@ impl<'a> Parser<'a> {
         self.gc.stop();
 
         let name = self.gc.intern_string(String::from("<script>"));
-        self.push_context(name);
+        self.push_context(name, FunctionType::Script);
 
         self.advance(); // Prime the parser
 
@@ -202,14 +212,14 @@ impl<'a> Parser<'a> {
     //-----------------------------------------------------
     // Parsing Context management
     /// Push a new parsing context
-    fn push_context(&mut self, name: GcObject) {
+    fn push_context(&mut self, name: GcObject, kind: FunctionType) {
         let last_depth = self.contexts.last().map_or(0, |ctx| ctx.scope_depth);
         self.contexts.push(Context::new(name, last_depth));
 
         // Slot zero of every function's stack frame is reserved for internal use.
-        self.context()
-            .locals
-            .push(Local::new(Token::default(), 0, false));
+        // TODO Add support for resolving this.
+        let local = Local::new(Token::default(), 0, false);
+        self.context().locals.push(local);
     }
 
     /// Pop the current parsing context and return the generated function object
@@ -275,9 +285,15 @@ impl<'a> Parser<'a> {
         // A class can refer itself inside itself
         self.define_variable(name_idx);
 
+        // We need to access the class object created to bind method to it.
+        // So, we push that class object onto the stack.
+        self.named_variable(&name, false)?;
         self.consume(TokenKind::LeftBrace, "Expect '{' before class body.")?;
-        // TODO parse class body
+        while !self.check(TokenKind::RightBrace) && !self.check(TokenKind::Eof) {
+            self.method()?;
+        }
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.")?;
+        self.emit_opcode(OpCode::Pop); // Pop the class object.
 
         Ok(())
     }
@@ -307,7 +323,7 @@ impl<'a> Parser<'a> {
         let global = self.parse_new_variable("Expect function name after 'fun'.")?;
         self.mark_initialized(); // A function can call itself
 
-        self.function()?;
+        self.function(FunctionType::Function)?;
         self.define_variable(global);
 
         Ok(())
@@ -727,6 +743,11 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn this(&mut self) -> ParseResult {
+        self.variable(false)?;
+        Ok(())
+    }
+
     fn variable(&mut self, can_assign: bool) -> ParseResult {
         let name = self.previous;
         self.named_variable(&name, can_assign)
@@ -755,12 +776,12 @@ impl<'a> Parser<'a> {
     /// Parse function parameter list and its body, add the function to chunk's constant table,
     /// then emit code for wrapping the resulting function object inside a closure.
     /// The resulting closure will be on top of the stack.
-    fn function(&mut self) -> Result<(), ()> {
+    fn function(&mut self, kind: FunctionType) -> Result<(), ()> {
         let name = self.get_lexeme(&self.previous).to_string();
         let name = self.gc.intern_string(name);
         let mut arity = 0u32;
 
-        self.push_context(name);
+        self.push_context(name, kind);
         self.begin_scope();
 
         self.consume(TokenKind::LeftParen, "Expect '(' after function name.")?;
@@ -808,6 +829,17 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse a single method inside of a class
+    fn method(&mut self) -> ParseResult {
+        let name = self.consume(TokenKind::Identifier, "Expect method name.")?;
+        let name_idx = self.add_identifier_constant(&name);
+
+        self.function(FunctionType::Method)?;
+        self.emit_with_operand(OpCode::Method, name_idx);
+
+        Ok(())
+    }
+
     fn argument_list(&mut self) -> Result<u32, ()> {
         let mut arg_count = 0u32;
 
@@ -839,6 +871,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Emits code for accessing/assigning a variable.
+    /// If accessing the value of the variable is just pushed onto the stack.
     fn named_variable(&mut self, name: &Token, can_assign: bool) -> ParseResult {
         let (index, set_op, get_op) =
             if let Some(index) = self.resolve_local(self.context_const(), name) {
@@ -1199,6 +1232,7 @@ impl<'a> Parser<'a> {
     //-----------------------------------------------------
     fn exec_prefix_rule(&mut self, operator: TokenKind, can_assign: bool) -> ParseResult {
         match operator {
+            TokenKind::This => self.this(),
             TokenKind::Identifier => self.variable(can_assign),
             TokenKind::Number => self.number(),
             TokenKind::LeftParen => self.grouping(),

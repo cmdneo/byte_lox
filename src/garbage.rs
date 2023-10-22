@@ -128,14 +128,18 @@ impl Tracer {
         match &object.kind {
             ObjectKind::Instance(ins) => {
                 self.mark_object(ins.class_obj);
-                for (object, &value) in ins.fields.iter() {
-                    self.mark_object(object);
+                for (name, &value) in ins.fields.iter() {
+                    self.mark_object(name);
                     self.mark_value(value);
                 }
             }
 
             ObjectKind::Class(cls) => {
                 self.mark_object(cls.name);
+                for (name, &meth) in cls.methods.iter() {
+                    self.mark_object(name);
+                    self.mark_object(meth);
+                }
             }
 
             ObjectKind::UpValue(uv) => {
@@ -154,6 +158,11 @@ impl Tracer {
                 for &uv in clos.upvalues.iter() {
                     self.mark_object(uv);
                 }
+            }
+
+            ObjectKind::BoundMethod(meth) => {
+                self.mark_value(meth.reciever);
+                self.mark_object(meth.method);
             }
 
             // Other types are never added to the gray_stack list,
@@ -269,6 +278,10 @@ impl GarbageCollector {
             self.tracer.mark_value(value);
         }
 
+        for frame in vm.call_frames.iter() {
+            self.tracer.mark_object(frame.closure_obj);
+        }
+
         // The interned string table is assumed to contain weak references
         // to string objects, so we do not treat them as roots.
     }
@@ -313,9 +326,10 @@ impl Drop for GarbageCollector {
 }
 
 /// Garbage Collected smart pointer for Lox Objects.
+/// It is unchecked interior mutable.
 ///
 /// The pointer after its creation, must be added to the VM's garbage collector
-/// to avoid memory leaks and dangling references.
+/// to avoid memory leaks.
 ///
 /// To ensure that it is always added to the VM's GC, create it only via the
 /// interface provided by GarbageCollector instead of creating it directly.
@@ -338,6 +352,12 @@ impl GcObject {
     #[inline]
     pub fn is_same_as(&self, other: &GcObject) -> bool {
         self.object_ptr == other.object_ptr
+    }
+
+    /// Returns the ID of the object.
+    /// Implementation detail: It just returns its memory address.
+    pub fn id(&self) -> usize {
+        self.object_ptr.as_ptr() as usize
     }
 
     /// Returns the allocated object along with bytes allocated
@@ -430,6 +450,7 @@ fn fmt_as_type_value(object: &ObjectKind) -> String {
         ObjectKind::UpValue(_) => "UPVALUE",
         ObjectKind::Function(_) => "FUNCTION",
         ObjectKind::Closure(_) => "CLOSURE",
+        ObjectKind::BoundMethod(_) => "BOUND_METHOD",
         ObjectKind::Native(_) => "NATIVE",
         ObjectKind::Invalid => unreachable!(),
     };
