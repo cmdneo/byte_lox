@@ -790,7 +790,7 @@ impl<'a> Parser<'a> {
 
     fn number(&mut self) -> ParseResult {
         let num = self.parse_number(&self.previous)?;
-        self.emit_constant(Value::Number(num));
+        self.emit_constant(num.into());
 
         Ok(())
     }
@@ -801,7 +801,7 @@ impl<'a> Parser<'a> {
 
         // A string object is heap allocated, hence use the GC to create it.
         let object = self.gc.intern_string(string);
-        self.emit_constant(Value::Object(object));
+        self.emit_constant(object.into());
 
         Ok(())
     }
@@ -848,7 +848,7 @@ impl<'a> Parser<'a> {
 
         // Make the function object and add it to enclosing chunk's contant table
         let function = self.gc.create_object(function.into());
-        let index = self.chunk().add_constant(Value::Object(function)) as u32;
+        let index = self.chunk().add_constant(function.into()) as u32;
 
         // Wrap the function inside of a closure and then emit the upvalue vector
         // which contains info about each upvalue captured by the function.
@@ -1010,7 +1010,7 @@ impl<'a> Parser<'a> {
         if let Some(&index) = self.context_const().ident_index_table.find(ident) {
             index
         } else {
-            let index = self.chunk().add_constant(Value::Object(ident)) as u32;
+            let index = self.chunk().add_constant(ident.into()) as u32;
             self.context().ident_index_table.insert(ident, index);
             index
         }

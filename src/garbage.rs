@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    object::{Object, ObjectKind},
+    object::{Object, ObjectKind, UpValue},
     table::Table,
     value::Value,
     vm::VM,
@@ -84,8 +84,8 @@ impl Tracer {
         // All values except of those type GcObject which contains a
         // reference to an object are stored inline. Thus, values of type
         // other than objects are not managed by the GC and need no tracking.
-        if let Value::Object(obj) = value {
-            self.mark_object(obj);
+        if value.is_object() {
+            self.mark_object(value.as_object());
         }
     }
 
@@ -326,6 +326,53 @@ impl Drop for GarbageCollector {
     }
 }
 
+// ==================== IMPORTANT ====================
+// Any reference to a GC owned object(or part of it) must be returned as
+// `GcRef` or `GcRefMut` only, and it must guranteed by the user that the
+// `GcRef`/`GcRefMut` does not point to a non-existing(freed) `GcObject`.
+// Exclusive mutability should be maintained, that, never at the same
+// time more than one `GcRefMut`s point to the same object.
+
+/// References different types of objects stored in `GcObject`.
+/// Object type is one of types stored in `ObjectKind` variants.
+pub struct GcRef<T>(*const T);
+
+impl<T> GcRef<T> {
+    pub fn new(ptr: *const T) -> Self {
+        Self(ptr)
+    }
+}
+
+impl<T> Deref for GcRef<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*(self.0) }
+    }
+}
+
+/// Mutably references different types of objects stored in `GcObject`.
+/// Object type is one of types stored in `ObjectKind` variants.
+pub struct GcRefMut<T>(*mut T);
+
+impl<T> GcRefMut<T> {
+    pub fn new(ptr: *mut T) -> Self {
+        Self(ptr)
+    }
+}
+
+impl<T> Deref for GcRefMut<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*(self.0) }
+    }
+}
+
+impl<T> DerefMut for GcRefMut<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *(self.0) }
+    }
+}
+
 /// Garbage Collected smart pointer for Lox Objects.
 /// It is unchecked interior mutable.
 ///
@@ -335,6 +382,7 @@ impl Drop for GarbageCollector {
 /// To ensure that it is always added to the VM's GC, create it only via the
 /// interface provided by GarbageCollector instead of creating it directly.
 #[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
 pub struct GcObject {
     object_ptr: NonNull<Object>,
 }
@@ -355,15 +403,14 @@ impl GcObject {
         self.object_ptr == other.object_ptr
     }
 
-    /// Returns the ID of the object.
-    /// Implementation detail: It just returns its memory address.
-    pub fn id(&self) -> usize {
-        self.object_ptr.as_ptr() as usize
-    }
-
     /// Returns the allocated object along with bytes allocated
     unsafe fn allocate(object: ObjectKind) -> Self {
-        let new_object = Box::new(Object::default());
+        // Put a dummy object for now
+        let new_object = Box::new(Object {
+            hash: 0,
+            marked: false,
+            kind: UpValue::new(null_mut()).into(),
+        });
         let ptr = Box::leak(new_object) as *mut Object;
 
         trace_gc!("{:?} allocate type {}", ptr, fmt_as_type_value(&object));
@@ -391,11 +438,7 @@ impl GcObject {
     }
 }
 
-impl Into<Value> for GcObject {
-    fn into(self) -> Value {
-        Value::Object(self)
-    }
-}
+impl Eq for GcObject {}
 
 impl PartialEq for GcObject {
     fn eq(&self, other: &Self) -> bool {
@@ -453,7 +496,6 @@ fn fmt_as_type_value(object: &ObjectKind) -> String {
         ObjectKind::Closure(_) => "CLOSURE",
         ObjectKind::BoundMethod(_) => "BOUND_METHOD",
         ObjectKind::Native(_) => "NATIVE",
-        ObjectKind::Invalid => unreachable!(),
     };
 
     format!("{:8} = {}", type_name, object)

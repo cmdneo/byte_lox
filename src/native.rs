@@ -1,6 +1,6 @@
 use std::{thread, time};
 
-use crate::{garbage::GarbageCollector, object::ObjectKind, value::Value};
+use crate::{garbage::GarbageCollector, value::Value};
 
 pub type NativeResult = Result<Value, &'static str>;
 pub type NativeFunction = fn(&mut GarbageCollector, &mut [Value]) -> NativeResult;
@@ -26,46 +26,40 @@ fn clock(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
         .expect("Time before UNIX_EPOCH, did it go backwards!?")
         .as_secs_f64();
 
-    Ok(Value::Number(sec))
+    Ok(sec.into())
 }
 
 fn sleep(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 1);
 
-    if let Value::Number(time) = args[0] {
-        thread::sleep(time::Duration::from_secs_f64(time));
-        Ok(Value::Nil)
-    } else {
+    if !args[0].is_number() {
         Err("Argument must be a number.")
+    } else {
+        thread::sleep(time::Duration::from_secs_f64(args[0].as_number()));
+        Ok(Value::nil())
     }
 }
 
 fn string(gc: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 1);
 
-    let object = gc.create_object(ObjectKind::from(args[0].to_string()));
-    Ok(Value::Object(object))
+    let object = gc.intern_string(args[0].to_string());
+    Ok(object.into())
 }
 
 macro_rules! extract_attr_args {
     ($args_slice:ident) => {{
         let field = $args_slice[1];
-        let instance = $args_slice[0].as_instance();
+        let mut instance = $args_slice[0];
 
-        if instance.is_err() {
+        if !instance.is_instance() {
             return Err("First argument should be a class instance.");
         }
         if !field.is_string() {
             return Err("Second argument to should be a string.");
         }
 
-        let field = if let Value::Object(obj) = field {
-            obj
-        } else {
-            unreachable!()
-        };
-
-        (instance.unwrap(), field)
+        (instance.as_instance_mut(), field.as_object())
     }};
 }
 
@@ -73,7 +67,7 @@ fn hasattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 2);
     let (instance, field) = extract_attr_args!(args);
 
-    Ok(Value::Boolean(instance.fields.find(field).is_some()))
+    Ok(instance.fields.find(field).is_some().into())
 }
 
 fn getattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
@@ -90,7 +84,7 @@ fn getattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
 fn setattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 3);
     let value = args[2];
-    let (instance, field) = extract_attr_args!(args);
+    let (mut instance, field) = extract_attr_args!(args);
 
     instance.fields.insert(field, value);
     Ok(value)
@@ -98,10 +92,10 @@ fn setattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
 
 fn delattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     assert!(args.len() == 2);
-    let (instance, field) = extract_attr_args!(args);
+    let (mut instance, field) = extract_attr_args!(args);
 
     if instance.fields.delete(field) {
-        Ok(Value::Nil)
+        Ok(Value::nil())
     } else {
         Err("Instance has no such attribute.")
     }

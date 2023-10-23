@@ -14,7 +14,7 @@ use std::{
 use crate::{
     chunk::{Chunk, OpCode},
     compiler, debug,
-    garbage::GarbageCollector,
+    garbage::{GarbageCollector, GcRef},
     native,
     object::{
         obj_as, BoundMethod, Class, Closure, GcObject, Instance, Native, ObjectKind, UpValue,
@@ -40,7 +40,7 @@ macro_rules! binary_arith_op {
 macro_rules! binary_cmp_op {
     ($obj:ident, $op_name:ident) => {
         let right = $obj.stack.pop();
-        $obj.stack_apply(|left| Value::Boolean(left.$op_name(&right)));
+        $obj.stack_apply(|left| (left.$op_name(&right)).into());
     };
 }
 
@@ -100,7 +100,7 @@ impl CallFrame {
     }
 
     #[inline(always)]
-    fn closure(&self) -> &Closure {
+    fn closure(&self) -> GcRef<Closure> {
         obj_as!(Closure from self.closure_obj)
     }
 }
@@ -150,8 +150,8 @@ impl VM {
         // The top-level code resides inside of an implicitly defined function.
         // The first slot of the stack frame of a function call contains
         // the object being called. So, we push the object before calling it.
-        self.push(Value::Object(closure));
-        self.call_value(Value::Object(closure), 0)?;
+        self.push(closure.into());
+        self.call_value(closure.into(), 0)?;
 
         let result = self.run();
         self.gc.stop();
@@ -175,7 +175,7 @@ impl VM {
                 let offset =
                     unsafe { self.frame.ip.offset_from(self.chunk().code.as_ptr()) } as usize;
                 eprintln!();
-                debug::disassemble_instruction(self.chunk(), offset);
+                debug::disassemble_instruction(&self.chunk(), offset);
             }
 
             let byte = self.next_byte();
@@ -194,15 +194,15 @@ impl VM {
                 }
 
                 OpCode::Nil => {
-                    self.push(Value::Nil);
+                    self.push(Value::nil());
                 }
 
                 OpCode::True => {
-                    self.push(Value::Boolean(true));
+                    self.push(true.into());
                 }
 
                 OpCode::False => {
-                    self.push(Value::Boolean(false));
+                    self.push(false.into());
                 }
 
                 OpCode::Pop => {
@@ -264,12 +264,11 @@ impl VM {
 
                 OpCode::GetProperty => {
                     let name = self.read_object(is_long);
-                    let mut instance = self.peek(0); // Maybe instance
-                    let instance = if let Ok(ins) = instance.as_instance() {
-                        ins
-                    } else {
+                    let instance = self.peek(0);
+                    if !instance.is_instance() {
                         return self.error("Only instances have fields.");
-                    };
+                    }
+                    let instance = self.peek(0).as_instance();
 
                     // Fields take priority over method
                     if let Some(&value) = instance.fields.find(name) {
@@ -278,18 +277,17 @@ impl VM {
                     } else {
                         let meth = self.bind_method(instance.class_obj, name)?;
                         self.pop(); // Instance
-                        self.push(Value::Object(meth));
+                        self.push(meth.into());
                     }
                 }
 
                 OpCode::SetProperty => {
                     let name = self.read_object(is_long);
                     let mut instance = self.peek(1);
-                    let instance = if let Ok(ins) = instance.as_instance() {
-                        ins
-                    } else {
+                    if !instance.is_instance() {
                         return self.error("Only instances have fields.");
-                    };
+                    }
+                    let mut instance = instance.as_instance_mut();
 
                     instance.fields.insert(name, self.peek(0));
                     // Pop the instance and push result of the assingment back.
@@ -365,7 +363,7 @@ impl VM {
                 }
 
                 OpCode::Not => {
-                    self.stack_apply(|v| Value::Boolean(!v.truthiness()));
+                    self.stack_apply(|v| (!v.truthiness()).into());
                 }
 
                 OpCode::Print => {
@@ -423,10 +421,10 @@ impl VM {
 
                 OpCode::Closure => {
                     // The object is a function object
-                    let object = self.read_object(is_long);
-                    let mut closure = self.gc.create_object(Closure::new(object).into());
+                    let function = self.read_object(is_long);
+                    let mut closure = self.gc.create_object(Closure::new(function).into());
                     // Push to avoid GC collecting it when we create upvalues
-                    self.push(Value::Object(closure));
+                    self.push(closure.into());
 
                     // For each closed variable:
                     // If the closed variable is local then we create a new reference
@@ -437,7 +435,7 @@ impl VM {
                     // already executed, therefore, it contains a valid reference
                     // for the upvalue, we just copy that.
                     // It is done recursively(by the compiler) so it works for nested cases.
-                    let closure = obj_as!(mut Closure from closure);
+                    let mut closure = obj_as!(mut Closure from closure);
                     for uv in closure.upvalues.iter_mut() {
                         let is_local = self.read_operand(false) == 1;
                         let index = self.read_operand(true);
@@ -459,17 +457,13 @@ impl VM {
                 OpCode::Class => {
                     let name = self.read_object(is_long);
                     let class = self.gc.create_object(Class::new(name).into());
-                    self.push(Value::Object(class));
+                    self.push(class.into());
                 }
 
                 OpCode::Method => {
                     let meth_name = self.read_object(is_long);
-                    let meth = self.peek(0).as_object().unwrap();
-                    self.peek(1)
-                        .as_class()
-                        .unwrap()
-                        .methods
-                        .insert(meth_name, meth);
+                    let meth = self.peek(0).as_object();
+                    self.peek(1).as_class_mut().methods.insert(meth_name, meth);
 
                     self.pop();
                 }
@@ -572,17 +566,16 @@ impl VM {
         }
     }
 
-    /// Does work for the `Invoke` opcode
+    /// Does work for the `Invoke` opcode.
     fn invoke(&mut self, name: GcObject, arg_count: usize) -> InterpretResult {
         // Invoke is used for code like: object.property(arguments...)
         // And the stack looks like    : [..., object, arguments...]
         // The reciever is already on the stack before the arguments.
-        let mut reciever = self.peek(arg_count);
-        let instance = if let Ok(ins) = reciever.as_instance() {
-            ins
-        } else {
-            return self.error("Only instances have methods.");
-        };
+        let reciever = self.peek(arg_count);
+        if !reciever.is_instance() {
+            return self.error("Only instances have fields.");
+        }
+        let instance = reciever.as_instance();
 
         // Fields take priority over methods, therefore, we check if a field with the same name exist.
         if let Some(&field) = instance.fields.find(name) {
@@ -596,7 +589,7 @@ impl VM {
 
     fn invoke_from_class(
         &mut self,
-        class: &Class,
+        class: GcRef<Class>,
         name: GcObject,
         arg_count: usize,
     ) -> InterpretResult {
@@ -609,35 +602,36 @@ impl VM {
 
     /// Calls the value if it is a function or class object
     fn call_value(&mut self, callee: Value, arg_count: usize) -> InterpretResult {
-        if let Value::Object(object) = callee {
-            match &object.kind {
-                ObjectKind::Class(cls) => {
-                    let instance = self.gc.create_object(Instance::new(object).into());
-                    // Replace the class object with the instance which `this` should resolve to.
-                    let new_fp = self.stack.len() - arg_count - 1;
-                    self.stack[new_fp] = instance.into();
+        if !callee.is_object() {
+            return self.error("Can only call functions and classes.");
+        }
 
-                    // If initializer exists then call it, otherwise leave the instance blank.
-                    if let Some(&init) = cls.methods.find(self.init_string) {
-                        return self.call_closure(init, arg_count);
-                    } else if arg_count != 0 {
-                        return self.error(&format!("Expected 0 arguments but got {arg_count}."));
-                    }
+        let object = callee.as_object();
+        match &object.kind {
+            ObjectKind::Class(cls) => {
+                let instance = self.gc.create_object(Instance::new(object).into());
+                // Replace the class object with the instance which `this` should resolve to.
+                let new_fp = self.stack.len() - arg_count - 1;
+                self.stack[new_fp] = instance.into();
 
-                    Ok(())
+                // If initializer exists then call it, otherwise leave the instance blank.
+                if let Some(&init) = cls.methods.find(self.init_string) {
+                    return self.call_closure(init, arg_count);
+                } else if arg_count != 0 {
+                    return self.error(&format!("Expected 0 arguments but got {arg_count}."));
                 }
-                ObjectKind::BoundMethod(meth) => {
-                    // Replace the method object with the instance which `this` should resolve to.
-                    let new_fp = self.stack.len() - arg_count - 1;
-                    self.stack[new_fp] = meth.reciever;
-                    self.call_closure(meth.method, arg_count)
-                }
-                ObjectKind::Native(fun) => self.call_native(fun, arg_count),
-                ObjectKind::Closure(_) => self.call_closure(object, arg_count),
-                _ => self.error("Can only call functions and classes."),
+
+                Ok(())
             }
-        } else {
-            self.error("Can only call functions and classes")
+            ObjectKind::BoundMethod(meth) => {
+                // Replace the method object with the instance which `this` should resolve to.
+                let new_fp = self.stack.len() - arg_count - 1;
+                self.stack[new_fp] = meth.reciever;
+                self.call_closure(meth.method, arg_count)
+            }
+            ObjectKind::Native(fun) => self.call_native(fun, arg_count),
+            ObjectKind::Closure(_) => self.call_closure(object, arg_count),
+            _ => self.error("Can only call functions and classes."),
         }
     }
 
@@ -725,8 +719,8 @@ impl VM {
     //-----------------------------------------------------
     /// Currently executing chunks
     #[inline]
-    fn chunk(&self) -> &Chunk {
-        &self.frame.closure().function().chunk
+    fn chunk(&self) -> GcRef<Chunk> {
+        GcRef::new(&self.frame.closure().function().chunk)
     }
 
     #[inline]
@@ -771,11 +765,7 @@ impl VM {
     }
 
     fn read_object(&mut self, is_long: bool) -> GcObject {
-        if let Value::Object(name) = self.read_constant(is_long) {
-            name
-        } else {
-            unreachable!()
-        }
+        self.read_constant(is_long).as_object()
     }
 
     fn read_constant(&mut self, is_long: bool) -> Value {
@@ -797,7 +787,7 @@ impl VM {
     fn get_upvalue_mut(&mut self, slot: usize) -> &mut Value {
         // Upvalues are captured variable's addresses
         let uv = obj_as!(UpValue from self.frame.closure().upvalues[slot]);
-        unsafe { &mut *(uv.location) }
+        unsafe { uv.location.as_mut().unwrap_unchecked() }
     }
 
     #[inline]

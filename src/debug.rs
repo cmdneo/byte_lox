@@ -1,7 +1,6 @@
 use crate::{
     chunk::{Chunk, OpCode},
-    object::{obj_as, ObjectKind},
-    value::Value,
+    object::obj_as,
 };
 
 /// Disassembles an instruction at the `offset` and pretty prints it.
@@ -68,11 +67,11 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
             constant("CLOSURE", chunk, offset);
             let (operand, offset) = read_operand_for(chunk, offset);
 
-            let upvalue_count = if let Value::Object(obj) = chunk.constants[operand] {
-                obj_as!(Function from obj).upvalue_count as usize
-            } else {
-                unreachable!()
-            };
+            let func = chunk.constants[operand];
+            if !func.is_object() {
+                unreachable!();
+            }
+            let upvalue_count = obj_as!(Function from func.as_object()).upvalue_count as usize;
 
             let mut offset = offset;
             for _ in 0..upvalue_count {

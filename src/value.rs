@@ -1,6 +1,9 @@
 use std::{cmp::Ordering, fmt, ops};
 
-use crate::object::{Class, GcObject, Instance, ObjectKind};
+use crate::{
+    garbage::{GcRef, GcRefMut},
+    object::{self, Class, GcObject, Instance, ObjectKind},
+};
 
 /// The Lox dynamic value type.
 /// All operations on values must be type checked before
@@ -14,62 +17,122 @@ pub enum Value {
 }
 
 impl Value {
-    #[inline]
-    pub fn truthiness(&self) -> bool {
-        match *self {
+    pub fn nil() -> Self {
+        Self::Nil
+    }
+
+    pub fn truthiness(self) -> bool {
+        match self {
             Self::Nil => false,
             Self::Boolean(t) => t,
             _ => true,
         }
     }
 
-    #[inline]
-    pub fn as_instance(&mut self) -> Result<&mut Instance, ()> {
-        if let Value::Object(obj) = self {
-            if let ObjectKind::Instance(ins) = &mut obj.kind {
-                Ok(ins)
-            } else {
-                Err(())
-            }
-        } else {
-            Err(())
-        }
-    }
-
-    #[inline]
-    pub fn as_class(&mut self) -> Result<&mut Class, ()> {
-        if let Value::Object(obj) = self {
-            if let ObjectKind::Class(cls) = &mut obj.kind {
-                Ok(cls)
-            } else {
-                Err(())
-            }
-        } else {
-            Err(())
-        }
-    }
-
-    #[inline]
-    pub fn as_object(&self) -> Result<GcObject, ()> {
-        if let Value::Object(obj) = self {
-            Ok(*obj)
-        } else {
-            Err(())
-        }
-    }
-
-    #[inline]
-    pub fn is_string(&self) -> bool {
-        if let Value::Object(obj) = self {
-            matches!(obj.kind, ObjectKind::String(_))
-        } else {
-            false
-        }
-    }
-
-    #[inline]
-    pub fn is_number(&self) -> bool {
+    pub fn is_number(self) -> bool {
         matches!(self, Value::Number(_))
+    }
+
+    pub fn as_number(self) -> f64 {
+        if let Value::Number(v) = self {
+            v
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn is_nil(self) -> bool {
+        matches!(self, Self::Nil)
+    }
+
+    pub fn is_bool(self) -> bool {
+        matches!(self, Self::Boolean(_))
+    }
+
+    pub fn as_bool(self) -> bool {
+        if let Value::Boolean(v) = self {
+            v
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn is_object(self) -> bool {
+        matches!(self, Self::Object(_))
+    }
+
+    pub fn as_object(self) -> GcObject {
+        if let Value::Object(v) = self {
+            v
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn is_string(self) -> bool {
+        if !self.is_object() {
+            false
+        } else {
+            object::is_obj!(String, self.as_object())
+        }
+    }
+
+    pub fn as_string(self) -> GcRef<Box<str>> {
+        if let ObjectKind::String(s) = &self.as_object().kind {
+            GcRef::new(s as *const Box<str>)
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn is_instance(self) -> bool {
+        if !self.is_object() {
+            false
+        } else {
+            object::is_obj!(Instance, self.as_object())
+        }
+    }
+
+    pub fn as_instance(&self) -> GcRef<Instance> {
+        object::obj_as!(Instance from self.as_object())
+    }
+
+    pub fn as_instance_mut(&mut self) -> GcRefMut<Instance> {
+        object::obj_as!(mut Instance from self.as_object())
+    }
+
+    pub fn is_class(self) -> bool {
+        if !self.is_object() {
+            false
+        } else {
+            object::is_obj!(Class, self.as_object())
+        }
+    }
+
+    pub fn as_class(&self) -> GcRef<Class> {
+        object::obj_as!(Class from self.as_object())
+    }
+
+    pub fn as_class_mut(&self) -> GcRefMut<Class> {
+        object::obj_as!(mut Class from self.as_object())
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<GcObject> for Value {
+    fn from(value: GcObject) -> Self {
+        Self::Object(value)
     }
 }
 

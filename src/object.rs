@@ -1,7 +1,8 @@
 use std::fmt;
 
 use crate::{
-    chunk::Chunk, native::NativeFunction, strings::hash_string, table::Table, value::Value,
+    chunk::Chunk, garbage::GcRef, native::NativeFunction, strings::hash_string, table::Table,
+    value::Value,
 };
 
 // Re-export, make it available from the object module
@@ -10,22 +11,29 @@ pub use crate::garbage::GcObject;
 /// Extract object of a type `variant` from the `object_value`
 macro_rules! obj_as {
     ($variant:ident from $object_value:expr) => {
-        if let ObjectKind::$variant(value) = &$object_value.kind {
-            value
+        if let crate::object::ObjectKind::$variant(value) = &$object_value.kind {
+            crate::garbage::GcRef::new(value as *const crate::object::$variant)
         } else {
             unreachable!()
         }
     };
 
     (mut $variant:ident from $object_value:expr) => {
-        if let ObjectKind::$variant(value) = &mut $object_value.kind {
-            value
+        if let crate::object::ObjectKind::$variant(value) = &mut $object_value.kind {
+            crate::garbage::GcRefMut::new(value as *mut crate::object::$variant)
         } else {
             unreachable!()
         }
     };
 }
 pub(crate) use obj_as;
+
+macro_rules! is_obj {
+    ($variant:ident, $object_value:expr) => {
+        matches!($object_value.kind, crate::object::ObjectKind::$variant(_))
+    };
+}
+pub(crate) use is_obj;
 
 /// Heap allocated Lox Objects, with mark and sweep garbage collection.
 /// The actual object is stored as a pointer, it's allocation and deallocation
@@ -46,17 +54,34 @@ impl fmt::Display for Object {
     }
 }
 
-impl Default for Object {
-    fn default() -> Self {
-        Self {
-            marked: false,
-            hash: 0,
-            kind: ObjectKind::Invalid,
-        }
-    }
+impl Object {
+    // For Object variants.
+    // We return reference for types that are large.
+    // Mutable references can be obtained for mutable objects.
+    // fn is_string(self) -> bool {}
+    // fn as_string(&self) -> &str;
+
+    // fn is_instance(self) -> bool;
+    // fn as_instance(&self) -> &object::Instance;
+    // fn as_instance_mut(&mut self) -> &object::Instance;
+
+    // fn is_class(self) -> bool;
+    // fn as_class(&self) -> &object::Class;
+
+    // fn is_upvalue(self) -> bool;
+    // fn as_upvalue(&self) -> &object::UpValue;
+    // fn as_upvalue_mut(&mut self) -> &mut object::UpValue;
+
+    // fn is_function(self) -> bool;
+    // fn as_function(&self) -> &object::Function;
+
+    // fn is_closure(self) -> bool;
+    // fn as_closure(&self) -> &object::Closure;
 }
 
 /// Representation for different kind of dynamically allocated Lox Objects
+/// Out of all variants `Instance`, `Class` and `Upvalue` are mutable,
+/// rest are immutable.
 pub enum ObjectKind {
     // Not using string::String as size of a string is always fixed
     String(Box<str>),
@@ -67,7 +92,6 @@ pub enum ObjectKind {
     Closure(Closure),
     BoundMethod(BoundMethod),
     Native(Native),
-    Invalid,
 }
 
 impl ObjectKind {
@@ -123,7 +147,6 @@ impl fmt::Display for ObjectKind {
                 obj_as!(Closure from meth.method).function().name
             ),
             Self::Native(fun) => write!(f, "<native fn {}>", fun.name),
-            Self::Invalid => unreachable!(),
         }
     }
 }
@@ -191,7 +214,7 @@ impl Instance {
         }
     }
 
-    pub fn class(&self) -> &Class {
+    pub fn class(&self) -> GcRef<Class> {
         obj_as!(Class from self.class_obj)
     }
 }
@@ -209,7 +232,7 @@ impl UpValue {
     pub fn new(location: *mut Value) -> Self {
         Self {
             location,
-            value: Value::Nil,
+            value: Value::nil(),
         }
     }
 
@@ -248,7 +271,7 @@ impl Closure {
     }
 
     #[inline]
-    pub fn function(&self) -> &Function {
+    pub fn function(&self) -> GcRef<Function> {
         obj_as!(Function from self.function_obj)
     }
 }

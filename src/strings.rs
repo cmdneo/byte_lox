@@ -1,6 +1,6 @@
 use std::num::Wrapping;
 
-use crate::{garbage::GarbageCollector, object::ObjectKind, value::Value};
+use crate::{garbage::GarbageCollector, value::Value};
 
 /// Uses FNV-1a hash function to hash a string
 pub fn hash_string(string: &str) -> u32 {
@@ -18,18 +18,11 @@ pub fn hash_string(string: &str) -> u32 {
 /// Creates a new string object which is the concatenation of `lhs` and `rhs`
 /// The newly created string is interned.
 pub fn add_strings(lhs: &Value, rhs: &Value, gc: &mut GarbageCollector) -> Value {
-    match (lhs, rhs) {
-        (Value::Object(x), Value::Object(y)) => match (&x.kind, &y.kind) {
-            (ObjectKind::String(s), ObjectKind::String(t)) => {
-                let result = s.to_string() + t;
-                let object = gc.intern_string(result);
+    assert!(lhs.is_string() && rhs.is_string());
 
-                Value::Object(object)
-            }
+    let lhs = lhs.as_string().to_string();
+    let rhs = &*rhs.as_string();
+    let result = lhs + rhs;
 
-            _ => unreachable!(),
-        },
-
-        _ => unreachable!(),
-    }
+    gc.intern_string(result).into()
 }
