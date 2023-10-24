@@ -189,7 +189,7 @@ impl VM {
 
             match opcode {
                 OpCode::Constant => {
-                    let constant = self.read_constant(is_long);
+                    let constant = self.read_value(is_long);
                     self.push(constant);
                 }
 
@@ -294,6 +294,15 @@ impl VM {
                     let value = self.pop();
                     self.pop(); // Instance
                     self.push(value);
+                }
+
+                OpCode::GetSuper => {
+                    let name = self.read_object(is_long);
+                    let superclass = self.pop().as_object();
+
+                    let meth = self.bind_method(superclass, name)?;
+                    self.pop(); // Instance
+                    self.push(meth.into());
                 }
 
                 OpCode::Equal => {
@@ -413,10 +422,18 @@ impl VM {
                 }
 
                 OpCode::Invoke => {
-                    let name = self.read_object(is_long);
+                    let meth_name = self.read_object(is_long);
                     let arg_count = self.read_operand(is_long);
 
-                    self.invoke(name, arg_count)?;
+                    self.invoke(meth_name, arg_count)?;
+                }
+
+                OpCode::SuperInvoke => {
+                    let meth_name = self.read_object(is_long);
+                    let arg_count = self.read_operand(is_long);
+                    let superclass = self.pop().as_class();
+
+                    self.invoke_from_class(superclass, meth_name, arg_count)?;
                 }
 
                 OpCode::Closure => {
@@ -458,6 +475,23 @@ impl VM {
                     let name = self.read_object(is_long);
                     let class = self.gc.create_object(Class::new(name).into());
                     self.push(class.into());
+                }
+
+                // Copies all the superclass methods into the subclass's methods table
+                // It works fine even if the subclass overrides it. Because methods are
+                // added to a class after inheritance work is done, so it will just
+                // overwrite those with its(the subclass) own ones, if overridden.
+                OpCode::Inherit => {
+                    if !self.peek(1).is_class() {
+                        return self.error("Superclass must be a class.");
+                    }
+
+                    let mut subclass = self.peek(0).as_class_mut();
+                    let superclass = self.peek(1).as_class();
+
+                    subclass.methods.copy_from(&superclass.methods);
+                    // Pop subclass, leave the superclass it is used for capturing super.
+                    self.pop();
                 }
 
                 OpCode::Method => {
@@ -765,10 +799,10 @@ impl VM {
     }
 
     fn read_object(&mut self, is_long: bool) -> GcObject {
-        self.read_constant(is_long).as_object()
+        self.read_value(is_long).as_object()
     }
 
-    fn read_constant(&mut self, is_long: bool) -> Value {
+    fn read_value(&mut self, is_long: bool) -> Value {
         let index = self.read_operand(is_long);
         self.frame.closure().function().chunk.constants[index]
     }

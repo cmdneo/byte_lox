@@ -10,7 +10,7 @@ use crate::{
     value::Value,
 };
 
-/// Keeps info about the current loop for supporting
+/// Keeps info about the loops being compiled for supporting
 /// `continue` and `break` statements.
 struct Loop {
     /// Depth of the scope the loop resides in
@@ -23,11 +23,24 @@ struct Loop {
 }
 
 impl Loop {
-    pub fn new(scope_depth: i16, loop_begin: usize) -> Self {
+    fn new(scope_depth: i16, loop_begin: usize) -> Self {
         Loop {
             scope_depth,
             begin: loop_begin,
             exit_jumps: Vec::new(),
+        }
+    }
+}
+
+/// Keeps info about the classes being compiled
+struct ClassInfo {
+    has_superclass: bool,
+}
+
+impl ClassInfo {
+    fn new() -> Self {
+        Self {
+            has_superclass: false,
         }
     }
 }
@@ -136,14 +149,20 @@ pub struct Parser<'a> {
     contexts: Vec<Context>,
     /// Loop info for creating jump opcodes for `break` and `continue`
     loops: Vec<Loop>,
-    /// Counts the number of classes we are nested inside currently
-    class_depth: u32,
+    /// Class info for keeping track of which classes have superclasses
+    classes: Vec<ClassInfo>,
     /// For allocating objects generated during compilation to bytecode
     gc: &'a mut GarbageCollector,
     /// Internal error state tracker
     // Use interior mutability to avoid uncesesary mutability
     had_error: RefCell<bool>,
 }
+
+// Since the tokens this and super may not be in the token stream and
+// in a Token we store only positions in the stream, not actual strings.
+// We use some special token values to represent them
+const THIS_TOKEN: Token = Token::new(TokenKind::This, 0, 0, 0);
+const SUPER_TOKEN: Token = Token::new(TokenKind::Super, 0, 0, 0);
 
 /// Parse result indicator, `Parser::error` or `Parser::error_at` method must be
 /// called before returning the error variant to set the error flags appropriately.
@@ -183,7 +202,7 @@ impl<'a> Parser<'a> {
             source,
             contexts: Vec::with_capacity(4),
             loops: Vec::with_capacity(4),
-            class_depth: 0,
+            classes: Vec::with_capacity(4),
             gc,
             had_error: RefCell::new(false),
         }
@@ -229,12 +248,10 @@ impl<'a> Parser<'a> {
 
         // If the function being parsed is a class method then we store the associated instance
         // in slot zero, which is referenced by using the `this` keyword.
-        // Use a special Token value to represent the `this` token, since it
-        // may or may not be in the stream and we are not going to search for that.
-        // We just set `kind` to `TokenKind::This` to represent that special value.
+        // We use a special value to represent the `this` token. See doc for THIS_TOKEN.
         // If not a method then we leave that variable's name empty, so it can never be referenced.
         if matches!(kind, FunctionType::Method | FunctionType::Initializer) {
-            reserved.kind = TokenKind::This;
+            reserved = THIS_TOKEN;
         };
         self.context()
             .locals
@@ -295,19 +312,46 @@ impl<'a> Parser<'a> {
     }
 
     fn class_declaration(&mut self) -> ParseResult {
-        let name = self.consume(TokenKind::Identifier, "Expect class name.")?;
-        let name_idx = self.add_identifier_constant(&name);
+        let class_name = self.consume(TokenKind::Identifier, "Expect class name.")?;
+        let name_idx = self.add_identifier_constant(class_name);
 
         self.declare_variable();
         self.emit_with_operand(OpCode::Class, name_idx);
-        // A class can refer itself inside itself
+        // A class can refer itself inside itself, so mark it defined.
         self.define_variable(name_idx);
 
-        self.class_depth += 1;
+        self.classes.push(ClassInfo::new());
 
-        // We need to access the class object created to bind method to it.
+        // Note: The superclass(`super`) is actually captured by the methods as an upvalue,
+        // because it is local to the scope we push(see below), it is not a local variable for
+        // the methods. The local `super` goes out of scope after the class defnition finishes.
+        // It works because the superclass is determined lexically from where `super` is used.
+
+        if self.match_it(TokenKind::Less) {
+            let super_name = self.consume(TokenKind::Identifier, "Expect superclass name.")?;
+            self.named_variable(super_name, false)?; // Push superclass, ...
+
+            // Put the `super` as a local variable inside a new scope.
+            // We use a new scope, so that two classes in the same scope have
+            // different slots for `super`.
+            // Superclass is already on the stack as it should be for a local variable.
+            self.begin_scope();
+            let local_var = Local::new(SUPER_TOKEN, self.context().scope_depth, false);
+            self.context().locals.push(local_var);
+            self.define_variable(0);
+
+            self.named_variable(class_name, false)?; // and then push subclass
+            self.emit_opcode(OpCode::Inherit);
+            self.classes.last_mut().unwrap().has_superclass = true;
+
+            if self.get_lexeme(super_name) == self.get_lexeme(class_name) {
+                self.error("A class cannot inherit from itself.");
+            }
+        }
+
+        // We need to access the class object created to bind methods to it.
         // So, we push that class object onto the stack.
-        self.named_variable(&name, false)?;
+        self.named_variable(class_name, false)?;
         self.consume(TokenKind::LeftBrace, "Expect '{' before class body.")?;
         while !self.check(TokenKind::RightBrace) && !self.check(TokenKind::Eof) {
             self.method()?;
@@ -315,7 +359,11 @@ impl<'a> Parser<'a> {
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.")?;
         self.emit_opcode(OpCode::Pop); // Pop the class object.
 
-        self.class_depth -= 1;
+        if self.classes.last().unwrap().has_superclass {
+            self.end_scope(); // Pop scope for `super`
+        }
+
+        self.classes.pop();
         Ok(())
     }
 
@@ -716,7 +764,7 @@ impl<'a> Parser<'a> {
 
     fn dot(&mut self, can_assign: bool) -> ParseResult {
         let name = self.consume(TokenKind::Identifier, "Expect property name after '.'")?;
-        let name_idx = self.add_identifier_constant(&name);
+        let name_idx = self.add_identifier_constant(name);
 
         if can_assign && self.match_it(TokenKind::Equal) {
             self.expression()?;
@@ -776,27 +824,56 @@ impl<'a> Parser<'a> {
     }
 
     fn this(&mut self) -> ParseResult {
-        if self.class_depth == 0 {
+        if self.classes.len() == 0 {
             self.error("Cannot use 'this' outside of a class.");
         }
         self.variable(false)?;
         Ok(())
     }
 
+    fn super_(&mut self) -> ParseResult {
+        if self.classes.is_empty() {
+            self.error("Cannot 'super' outside of a class.");
+        }
+        if !self.classes.last().unwrap().has_superclass {
+            self.error("Cannot use 'super' in a class with no superclass.");
+        }
+
+        self.consume(TokenKind::Dot, "Expect '.' after super.")?;
+        let name = self.consume(TokenKind::Identifier, "Expect superclass method name.")?;
+        let name_idx = self.add_identifier_constant(name);
+
+        // To access superclass method on the current instance,
+        // we need the superclass(for `super`) and the reciever(for `this`)
+        self.named_variable(THIS_TOKEN, false)?;
+
+        // Combine GetSuper and Call together using SuperInvoke opcode if possible.
+        if self.match_it(TokenKind::LeftParen) {
+            let arg_count = self.argument_list()?;
+            self.named_variable(SUPER_TOKEN, false)?;
+            self.emit_with_operand2(OpCode::SuperInvoke, name_idx, arg_count);
+        } else {
+            self.named_variable(SUPER_TOKEN, false)?;
+            self.emit_with_operand(OpCode::GetSuper, name_idx);
+        }
+
+        Ok(())
+    }
+
     fn variable(&mut self, can_assign: bool) -> ParseResult {
         let name = self.previous;
-        self.named_variable(&name, can_assign)
+        self.named_variable(name, can_assign)
     }
 
     fn number(&mut self) -> ParseResult {
-        let num = self.parse_number(&self.previous)?;
+        let num = self.parse_number(self.previous)?;
         self.emit_constant(num.into());
 
         Ok(())
     }
 
     fn string(&mut self) -> ParseResult {
-        let lexeme = self.get_lexeme(&self.previous);
+        let lexeme = self.get_lexeme(self.previous);
         let string = lexeme[1..lexeme.len() - 1].to_string();
 
         // A string object is heap allocated, hence use the GC to create it.
@@ -812,7 +889,7 @@ impl<'a> Parser<'a> {
     /// then emit code for wrapping the resulting function object inside a closure.
     /// The resulting closure will be on top of the stack.
     fn function(&mut self, kind: FunctionType) -> Result<(), ()> {
-        let name = self.get_lexeme(&self.previous).to_string();
+        let name = self.get_lexeme(self.previous).to_string();
         let name = self.gc.intern_string(name);
         let mut arity = 0u32;
 
@@ -867,9 +944,9 @@ impl<'a> Parser<'a> {
     /// Parse a single method inside of a class
     fn method(&mut self) -> ParseResult {
         let name = self.consume(TokenKind::Identifier, "Expect method name.")?;
-        let name_idx = self.add_identifier_constant(&name);
+        let name_idx = self.add_identifier_constant(name);
 
-        if self.get_lexeme(&name) == "init" {
+        if self.get_lexeme(name) == "init" {
             self.function(FunctionType::Initializer)?;
         } else {
             self.function(FunctionType::Method)?;
@@ -899,7 +976,7 @@ impl<'a> Parser<'a> {
         Ok(arg_count)
     }
 
-    fn parse_number(&self, token: &Token) -> Result<f64, ()> {
+    fn parse_number(&self, token: Token) -> Result<f64, ()> {
         match self.get_lexeme(token).parse::<f64>() {
             Ok(num) => Ok(num),
             Err(_) => {
@@ -911,7 +988,7 @@ impl<'a> Parser<'a> {
 
     /// Emits code for accessing/assigning a variable.
     /// If accessing the value of the variable is just pushed onto the stack.
-    fn named_variable(&mut self, name: &Token, can_assign: bool) -> ParseResult {
+    fn named_variable(&mut self, name: Token, can_assign: bool) -> ParseResult {
         let (index, set_op, get_op) =
             if let Some(index) = self.resolve_local(self.context_const(), name) {
                 (index, OpCode::SetLocal, OpCode::GetLocal)
@@ -950,7 +1027,7 @@ impl<'a> Parser<'a> {
         // But global variables are resolved at runtime(late bound), so their
         // names must be available to the runtime, we do this by storing their
         // names in the chunk's constant table and obtaining an index for it.
-        Ok(self.add_identifier_constant(&name))
+        Ok(self.add_identifier_constant(name))
     }
 
     // Utility methods
@@ -972,7 +1049,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            if self.get_lexeme(&local.name) == self.get_lexeme(&name) {
+            if self.get_lexeme(local.name) == self.get_lexeme(name) {
                 self.error("A variable with the name '{name}' already exists in this scope");
             }
         }
@@ -999,7 +1076,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Adds the identifier to chunk's constant table as a string object
-    fn add_identifier_constant(&mut self, name: &Token) -> u32 {
+    fn add_identifier_constant(&mut self, name: Token) -> u32 {
         let ident = self.get_lexeme(name).to_string();
         let ident = self.gc.intern_string(ident);
 
@@ -1017,18 +1094,23 @@ impl<'a> Parser<'a> {
     }
 
     /// Returns the position(at runtime) of the local variable on the stack
-    fn resolve_local(&self, context: &Context, name: &Token) -> Option<u32> {
+    fn resolve_local(&self, context: &Context, name: Token) -> Option<u32> {
         // Walk backwards to allow variables in the inner scope to shadow the
         // variables in the outer scopes.
         for (i, local) in context.locals.iter().enumerate().rev() {
-            // The `this`token is represented by a special value of token where
-            // kind of the token should be `TokenKind::This`.
-            // So, we need to check for it seperately.
-            if name.kind == TokenKind::This && local.name.kind == TokenKind::This {
-                return Some(i as u32);
+            // The `this` and `super` tokens are represented by a special value of token.
+            // So, we need to check for them seperately.
+            if cmp_kind(name, THIS_TOKEN) {
+                if cmp_kind(local.name, THIS_TOKEN) {
+                    return Some(i as u32);
+                }
+            } else if cmp_kind(name, SUPER_TOKEN) {
+                if cmp_kind(local.name, SUPER_TOKEN) {
+                    return Some(i as u32);
+                }
             }
-
-            if self.get_lexeme(&local.name) == self.get_lexeme(name) {
+            // The general case, where lexemes need to be compared.
+            else if self.get_lexeme(local.name) == self.get_lexeme(name) {
                 // If the local is in an uninitialized state
                 if local.depth == -1 {
                     self.error("Cannot read variable in its own initializer.");
@@ -1044,7 +1126,7 @@ impl<'a> Parser<'a> {
     /// Resolve upvalue for the context passed(as `context_idx`)
     // We are using index for the context because Rust's owenership rules do
     // not allow mutable and immutabel references at the same time.
-    fn resolve_upvalue(&mut self, context_idx: usize, name: &Token) -> Option<u32> {
+    fn resolve_upvalue(&mut self, context_idx: usize, name: Token) -> Option<u32> {
         // We are in the outermost context, it has no enclosing context, thus no upvalues.
         if context_idx == 0 {
             return None;
@@ -1130,7 +1212,7 @@ impl<'a> Parser<'a> {
         self.loops.last().map(|lloop| lloop.scope_depth)
     }
 
-    fn get_lexeme(&self, token: &Token) -> &str {
+    fn get_lexeme(&self, token: Token) -> &str {
         // token.lexeme(self.source)
         &self.source[(token.start as usize)..(token.end as usize)]
     }
@@ -1264,7 +1346,7 @@ impl<'a> Parser<'a> {
         if self.check(kind) {
             Ok(self.advance())
         } else {
-            self.error_at(&self.current, message);
+            self.error_at(self.current, message);
             Err(())
         }
     }
@@ -1292,16 +1374,16 @@ impl<'a> Parser<'a> {
 
         // Detect keyword
         if let TokenKind::Identifier = token.kind {
-            token.kind = identifier_type(self.get_lexeme(&token));
+            token.kind = identifier_type(self.get_lexeme(token));
         }
 
         // Check if any errors occured while scanning tokens and report them
         match token.kind {
             TokenKind::UnknownChar => {
-                self.error_at(&token, "Unknown character encountered.");
+                self.error_at(token, "Unknown character encountered.");
             }
             TokenKind::UnterminatedString => {
-                self.error_at(&token, "String literal not terminated.");
+                self.error_at(token, "String literal not terminated.");
             }
             _ => {}
         }
@@ -1316,6 +1398,7 @@ impl<'a> Parser<'a> {
     fn exec_prefix_rule(&mut self, operator: TokenKind, can_assign: bool) -> ParseResult {
         match operator {
             TokenKind::This => self.this(),
+            TokenKind::Super => self.super_(),
             TokenKind::Identifier => self.variable(can_assign),
             TokenKind::Number => self.number(),
             TokenKind::LeftParen => self.grouping(),
@@ -1391,10 +1474,10 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) {
-        self.error_at(&self.previous, message);
+        self.error_at(self.previous, message);
     }
 
-    fn error_at(&self, token: &Token, message: &str) {
+    fn error_at(&self, token: Token, message: &str) {
         self.had_error.replace(true);
 
         let lexeme = self.get_lexeme(token);
@@ -1446,6 +1529,12 @@ fn make_pop_for_locals(locals: &[Local], after_depth: i16) -> Vec<OpCode> {
             }
         })
         .collect()
+}
+
+/// Returns true all have the same kind of token. Other fields are ignored.
+#[inline]
+fn cmp_kind(a: Token, b: Token) -> bool {
+    a.kind == b.kind
 }
 
 fn identifier_type(ident: &str) -> TokenKind {

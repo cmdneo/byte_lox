@@ -76,7 +76,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn new(kind: TokenKind, start: u32, end: u32, line: u32) -> Self {
+    pub const fn new(kind: TokenKind, start: u32, end: u32, line: u32) -> Self {
         Token {
             kind,
             start,

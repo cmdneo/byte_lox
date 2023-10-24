@@ -46,6 +46,11 @@ pub enum OpCode {
     GetProperty,
     /// Set property value
     SetProperty,
+    /// Get the superclass method and bind it to reciever,
+    /// operand refers to the method name in chunk's constant table.
+    /// The superclass is on stack top and below it is the reciever.
+    /// Pops the superclass and the reciever, pushes the bound-method.
+    GetSuper,
 
     // Equality operators, work on all types
     Equal,
@@ -85,10 +90,15 @@ pub enum OpCode {
     /// Its operand contains the number of arguments being passed.
     Call,
     /// Combines GetProperty and Call, has two operands.
-    /// First : Index of the property name, in chunk's constant table.
+    /// First : Constant table index of the methods name,.
     /// Second: Number of arguments.
     /// Either both operands are long(2-bytes) or neither, indicated by MSB.
+    /// Reciever and arguments should be on the stack.
     Invoke,
+    /// Combines GetSuper and Call, has two operands - same as Invoke.
+    /// The superclass should be on stack top, and is popped after.
+    /// Reciever, arguments and the superclass should be on the stack.
+    SuperInvoke,
 
     /// Creates a closure object by wrapping a function referenced by its
     /// operand which is a constant-table index.
@@ -104,8 +114,14 @@ pub enum OpCode {
 
     /// Creates a class object and bind it to the name referred by its operand.
     Class,
-    /// Binds a closure object to a class as its method,
-    /// operand refers the the method's name.
+    /// Makes a class inherit from another. The subclass is on stack top and
+    /// below it is the superclass.
+    /// The subclass is popped and the superclass is not popped.
+    Inherit,
+    /// Binds a closure object to a class as its method, operand refers the the
+    /// method name in chunk's constant table.
+    /// The closure object is on stack top and below is the class object.
+    /// The closure is popped and the class is not popped.
     Method,
 
     /// Return from a procedure.

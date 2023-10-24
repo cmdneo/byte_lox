@@ -38,6 +38,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         SetUpvalue => operand("SET_UPVALUE", chunk, offset),
         GetProperty => constant("GET_PROPERTY", chunk, offset),
         SetProperty => constant("SET_PROPERTY", chunk, offset),
+        GetSuper => constant("GET_SUPER", chunk, offset),
 
         Equal => simple("EQUAL", offset),
         NotEqual => simple("NOT_EQUAL", offset),
@@ -62,6 +63,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         Loop => jump_instruction("LOOP", chunk, offset, -1),
         Call => operand("CALL", chunk, offset),
         Invoke => invoke_instruction("INVOKE", chunk, offset),
+        SuperInvoke => invoke_instruction("SUPER_INVOKE", chunk, offset),
 
         Closure => {
             constant("CLOSURE", chunk, offset);
@@ -91,6 +93,7 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         CloseUpvalue => simple("CLOSE_UPVALUE", offset),
 
         Class => constant("CLASS", chunk, offset),
+        Inherit => simple("INHERIT", offset),
         Method => constant("METHOD", chunk, offset),
 
         Return => simple("RETURN", offset),
@@ -168,7 +171,7 @@ fn read_operand_for(chunk: &Chunk, offset: usize) -> (usize, usize) {
     read_operand(chunk, offset, is_long)
 }
 
-/// Reads the operand at `offset`` and returns it with the new offset as a tuple.
+/// Reads the operand at `offset` and returns it with the new offset as a tuple.
 fn read_operand(chunk: &Chunk, offset: usize, is_long: bool) -> (usize, usize) {
     if is_long {
         // Long constant has 2-bytes operand
