@@ -6,10 +6,12 @@ pub type NativeResult = Result<Value, &'static str>;
 pub type NativeFunction = fn(&mut GarbageCollector, &mut [Value]) -> NativeResult;
 
 /// Native functions list: (name, function, arity)
-pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 7] = [
+pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 9] = [
     ("clock", clock, 0),
     ("sleep", sleep, 1),
     ("string", string, 1),
+    ("len", len, 1),
+    ("instanceof", instaceof, 2),
     ("hasattr", hasattr, 2),
     ("getattr", getattr, 2),
     ("setattr", setattr, 3),
@@ -47,6 +49,17 @@ fn string(gc: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     Ok(object.into())
 }
 
+fn len(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 1);
+
+    let seq = args[0];
+    if !seq.is_string() {
+        Err("Argument must be a string.")
+    } else {
+        Ok((seq.as_string().len() as f64).into())
+    }
+}
+
 macro_rules! extract_attr_args {
     ($args_slice:ident) => {{
         let field = $args_slice[1];
@@ -61,6 +74,15 @@ macro_rules! extract_attr_args {
 
         (instance.as_instance_mut(), field.as_object())
     }};
+}
+
+fn instaceof(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
+    assert!(args.len() == 2);
+
+    let instance = args[0].as_instance();
+    let class = args[1].as_object();
+
+    Ok(instance.class_obj.is_same_as(&class).into())
 }
 
 fn hasattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
