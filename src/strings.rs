@@ -1,18 +1,26 @@
-use std::num::Wrapping;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use crate::{garbage::GarbageCollector, value::Value};
 
 /// Uses FNV-1a hash function to hash a string
 pub fn hash_string(string: &str) -> u32 {
     let bytes = string.as_bytes();
-    let mut hash = Wrapping(2166136261u32); // FNV offset-basis
 
-    for &c in bytes {
-        hash ^= c as u32;
-        hash *= 16777619; // FNV prime
-    }
+    // Use builtin has function its much faster.
+    // It hashes a word at once instead of bytes.
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish() as u32
 
-    hash.0
+    // let mut hash = Wrapping(2166136261u32); // FNV offset-basis
+    // for &c in bytes {
+    //     hash ^= c as u32;
+    //     hash *= 16777619; // FNV prime
+    // }
+    // hash.0
 }
 
 /// Creates a new string object which is the concatenation of `lhs` and `rhs`
