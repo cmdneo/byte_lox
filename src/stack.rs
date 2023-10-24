@@ -99,12 +99,12 @@ impl<T, const CAP: usize> Index<usize> for Stack<T, CAP> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
-        if index >= self.sp {
-            panic!(
-                "Index out of bounds for stack. Index is {} for length {}",
-                index, self.sp
-            )
-        }
+        debug_assert!(
+            index < self.sp,
+            "Index out of bounds for stack. Index {} is for length {}",
+            index,
+            self.sp
+        );
 
         // self.sp is guranteed by self.push to be not greater than CAP
         unsafe { self.array[index].assume_init_ref() }
@@ -113,12 +113,12 @@ impl<T, const CAP: usize> Index<usize> for Stack<T, CAP> {
 
 impl<T, const CAP: usize> IndexMut<usize> for Stack<T, CAP> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        if index >= self.sp {
-            panic!(
-                "Index out of bounds for stack. Index {} is for length {}",
-                index, self.sp
-            )
-        }
+        debug_assert!(
+            index < self.sp,
+            "Index out of bounds for stack. Index {} is for length {}",
+            index,
+            self.sp
+        );
 
         // self.sp is guranteed by self.push to be not greater than CAP
         unsafe { self.array[index].assume_init_mut() }
