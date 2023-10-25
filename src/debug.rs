@@ -1,7 +1,4 @@
-use crate::{
-    chunk::{Chunk, OpCode},
-    object::obj_as,
-};
+use crate::{chunk::Chunk, object::obj_as, opcode::OpCode};
 
 /// Disassembles an instruction at the `offset` and pretty prints it.
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {

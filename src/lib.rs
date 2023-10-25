@@ -6,6 +6,7 @@ pub(crate) mod debug;
 pub(crate) mod garbage;
 pub(crate) mod native;
 pub(crate) mod object;
+pub(crate) mod opcode;
 pub(crate) mod parser;
 pub(crate) mod scanner;
 pub(crate) mod stack;

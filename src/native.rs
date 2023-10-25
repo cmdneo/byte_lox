@@ -99,7 +99,7 @@ fn getattr(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
     if let Some(value) = instance.fields.find(field) {
         Ok(*value)
     } else {
-        Err("No such field.")
+        Err("Instance has no such attribute.")
     }
 }
 

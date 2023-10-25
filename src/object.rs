@@ -54,31 +54,6 @@ impl fmt::Display for Object {
     }
 }
 
-impl Object {
-    // For Object variants.
-    // We return reference for types that are large.
-    // Mutable references can be obtained for mutable objects.
-    // fn is_string(self) -> bool {}
-    // fn as_string(&self) -> &str;
-
-    // fn is_instance(self) -> bool;
-    // fn as_instance(&self) -> &object::Instance;
-    // fn as_instance_mut(&mut self) -> &object::Instance;
-
-    // fn is_class(self) -> bool;
-    // fn as_class(&self) -> &object::Class;
-
-    // fn is_upvalue(self) -> bool;
-    // fn as_upvalue(&self) -> &object::UpValue;
-    // fn as_upvalue_mut(&mut self) -> &mut object::UpValue;
-
-    // fn is_function(self) -> bool;
-    // fn as_function(&self) -> &object::Function;
-
-    // fn is_closure(self) -> bool;
-    // fn as_closure(&self) -> &object::Closure;
-}
-
 /// Representation for different kind of dynamically allocated Lox Objects
 /// Out of all variants `Instance`, `Class` and `Upvalue` are mutable,
 /// rest are immutable.

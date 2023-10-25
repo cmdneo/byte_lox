@@ -1,137 +1,21 @@
 use std::{cell::RefCell, mem::transmute};
 
 use crate::{
-    chunk::{Chunk, OpCode},
+    chunk::Chunk,
     debug,
     garbage::GarbageCollector,
     object::{Function, GcObject},
+    opcode::OpCode,
     scanner::{Scanner, Token, TokenKind},
     table::Table,
     value::Value,
 };
 
-/// Keeps info about the loops being compiled for supporting
-/// `continue` and `break` statements.
-struct Loop {
-    /// Depth of the scope the loop resides in
-    scope_depth: i16,
-    /// Loop begin position
-    begin: usize,
-    /// Since when will the loop will end is not available in advance.
-    /// We store the position of exit jump offsets that needs to be patched.
-    exit_jumps: Vec<usize>,
-}
-
-impl Loop {
-    fn new(scope_depth: i16, loop_begin: usize) -> Self {
-        Loop {
-            scope_depth,
-            begin: loop_begin,
-            exit_jumps: Vec::new(),
-        }
-    }
-}
-
-/// Keeps info about the classes being compiled
-struct ClassInfo {
-    has_superclass: bool,
-}
-
-impl ClassInfo {
-    fn new() -> Self {
-        Self {
-            has_superclass: false,
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum FunctionType {
-    /// Ordinary function
-    Function,
-    /// Class method
-    Method,
-    /// Class constructor
-    Initializer,
-    /// Top-level
-    Script,
-}
-
-/// Stores a local variable
-pub struct Local {
-    pub name: Token,
-    pub depth: i16,
-    pub is_captured: bool,
-}
-
-impl Local {
-    pub fn new(name: Token, depth: i16, is_captured: bool) -> Self {
-        Self {
-            name,
-            depth,
-            is_captured,
-        }
-    }
-}
-
-/// Fields: index, is_local
-#[derive(PartialEq, Eq, Clone, Copy)]
-struct Upvalue {
-    index: u32,
-    is_local: bool,
-}
-
-impl Upvalue {
-    fn new(index: u32, is_local: bool) -> Self {
-        Self { index, is_local }
-    }
-}
-
-/// A context is used for parsing and generating code for function bodies
-/// seperately, each function has a context associated with it while it is being parsed.
-/// This technique simplifies parsing functions(even nested ones).
-/// The top-level code is also represented by an implicit function.
-struct Context {
-    /// Global identifiers to chunk's constant index table to
-    /// avoid duplicating identifiers whenever they are encountered.
-    ident_index_table: Table<u32>,
-    /// The associated function object
-    function: Function,
-    // Current scope depth
-    scope_depth: i16,
-    /// For resolving and tracking local variables
-    locals: Vec<Local>,
-    /// Tracks free variables for closure support
-    upvalues: Vec<Upvalue>,
-    /// Type of the function
-    kind: FunctionType,
-}
-
-impl Context {
-    fn new(name: GcObject, scope_depth: i16, kind: FunctionType) -> Self {
-        Self {
-            ident_index_table: Table::new(),
-            function: Function::named(name),
-            scope_depth,
-            // Rarely we have more than 8 local variables
-            locals: Vec::with_capacity(8),
-            upvalues: Vec::new(),
-            kind,
-        }
-    }
-
-    fn add_up_value(&mut self, index: u32, is_local: bool) -> u32 {
-        // If same upvalue variable already seen
-        for (i, &uv) in self.upvalues.iter().enumerate() {
-            if uv == Upvalue::new(index, is_local) {
-                return i as u32;
-            }
-        }
-
-        self.upvalues.push(Upvalue::new(index, is_local));
-        self.upvalues.len() as u32 - 1
-    }
-}
+// Since the tokens this and super may not be in the token stream and
+// in a Token we store only positions in the stream, not actual strings.
+// We use some special token values to represent them
+const THIS_TOKEN: Token = Token::new(TokenKind::This, 0, 0, 0);
+const SUPER_TOKEN: Token = Token::new(TokenKind::Super, 0, 0, 0);
 
 /// This module parses raw Lox source and generates the bytecode for it,
 /// to be executed by the VM module.
@@ -158,12 +42,6 @@ pub struct Parser<'a> {
     had_error: RefCell<bool>,
 }
 
-// Since the tokens this and super may not be in the token stream and
-// in a Token we store only positions in the stream, not actual strings.
-// We use some special token values to represent them
-const THIS_TOKEN: Token = Token::new(TokenKind::This, 0, 0, 0);
-const SUPER_TOKEN: Token = Token::new(TokenKind::Super, 0, 0, 0);
-
 /// Parse result indicator, `Parser::error` or `Parser::error_at` method must be
 /// called before returning the error variant to set the error flags appropriately.
 type ParseResult = Result<(), ()>;
@@ -186,11 +64,17 @@ enum Precedence {
     Primary,
 }
 
-fn next_precedence(precedence: Precedence) -> Precedence {
-    debug_assert!(precedence != Precedence::Primary);
-
-    // It is only used for next precendence of binary operators
-    unsafe { transmute::<u8, Precedence>(precedence as u8 + 1) }
+/// Type of the function we are generating code for
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum FunctionType {
+    /// Ordinary function
+    Function,
+    /// Class method
+    Method,
+    /// Class constructor
+    Initializer,
+    /// Top-level
+    Script,
 }
 
 impl<'a> Parser<'a> {
@@ -1491,6 +1375,117 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// A context is used for parsing and generating code for function bodies
+/// seperately, each function has a context associated with it while it is being parsed.
+/// This technique simplifies parsing functions(even nested ones).
+/// The top-level code is also represented by an implicit function.
+struct Context {
+    /// Global identifiers to chunk's constant index table to
+    /// avoid duplicating identifiers whenever they are encountered.
+    ident_index_table: Table<u32>,
+    /// The associated function object
+    function: Function,
+    // Current scope depth
+    scope_depth: i16,
+    /// For resolving and tracking local variables
+    locals: Vec<Local>,
+    /// Tracks free variables for closure support
+    upvalues: Vec<Upvalue>,
+    /// Type of the function
+    kind: FunctionType,
+}
+
+impl Context {
+    fn new(name: GcObject, scope_depth: i16, kind: FunctionType) -> Self {
+        Self {
+            ident_index_table: Table::new(),
+            function: Function::named(name),
+            scope_depth,
+            // Rarely we have more than 8 local variables
+            locals: Vec::with_capacity(8),
+            upvalues: Vec::new(),
+            kind,
+        }
+    }
+
+    fn add_up_value(&mut self, index: u32, is_local: bool) -> u32 {
+        // If same upvalue variable already seen
+        for (i, &uv) in self.upvalues.iter().enumerate() {
+            if uv == Upvalue::new(index, is_local) {
+                return i as u32;
+            }
+        }
+
+        self.upvalues.push(Upvalue::new(index, is_local));
+        self.upvalues.len() as u32 - 1
+    }
+}
+
+/// Local variable along with scope information
+pub struct Local {
+    pub name: Token,
+    pub depth: i16,
+    pub is_captured: bool,
+}
+
+impl Local {
+    pub fn new(name: Token, depth: i16, is_captured: bool) -> Self {
+        Self {
+            name,
+            depth,
+            is_captured,
+        }
+    }
+}
+
+/// Upvalue tracking
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct Upvalue {
+    index: u32,
+    is_local: bool,
+}
+
+impl Upvalue {
+    fn new(index: u32, is_local: bool) -> Self {
+        Self { index, is_local }
+    }
+}
+
+/// Keeps info about the loops being compiled for supporting
+/// `continue` and `break` statements.
+struct Loop {
+    /// Depth of the scope the loop resides in
+    scope_depth: i16,
+    /// Loop begin position
+    begin: usize,
+    /// Since when will the loop will end is not available in advance.
+    /// We store the position of exit jump offsets that needs to be patched.
+    exit_jumps: Vec<usize>,
+}
+
+impl Loop {
+    fn new(scope_depth: i16, loop_begin: usize) -> Self {
+        Loop {
+            scope_depth,
+            begin: loop_begin,
+            exit_jumps: Vec::new(),
+        }
+    }
+}
+
+/// Track classes being compiled
+struct ClassInfo {
+    has_superclass: bool,
+}
+
+impl ClassInfo {
+    fn new() -> Self {
+        Self {
+            has_superclass: false,
+        }
+    }
+}
+
 // Helper functions
 //-----------------------------------------------------
 fn infix_precedence(operator: TokenKind) -> Precedence {
@@ -1535,6 +1530,13 @@ fn make_pop_for_locals(locals: &[Local], after_depth: i16) -> Vec<OpCode> {
 #[inline]
 fn cmp_kind(a: Token, b: Token) -> bool {
     a.kind == b.kind
+}
+
+fn next_precedence(precedence: Precedence) -> Precedence {
+    debug_assert!(precedence != Precedence::Primary);
+
+    // It is only used for next precendence of binary operators
+    unsafe { transmute::<u8, Precedence>(precedence as u8 + 1) }
 }
 
 fn identifier_type(ident: &str) -> TokenKind {

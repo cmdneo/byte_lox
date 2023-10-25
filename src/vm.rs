@@ -12,13 +12,14 @@ use std::{
 };
 
 use crate::{
-    chunk::{Chunk, OpCode},
+    chunk::Chunk,
     compiler, debug,
     garbage::{GarbageCollector, GcRef},
     native,
     object::{
         obj_as, BoundMethod, Class, Closure, GcObject, Instance, Native, ObjectKind, UpValue,
     },
+    opcode::OpCode,
     stack::Stack,
     strings::add_strings,
     table::Table,
@@ -76,33 +77,6 @@ pub struct VM {
 pub enum InterpretError {
     Compile,
     Runtime,
-}
-
-pub(crate) struct CallFrame {
-    pub closure_obj: GcObject,
-    /// Instruction pointer
-    ip: *const u8,
-    /// Frame/base pointer
-    fp: usize,
-}
-
-impl CallFrame {
-    fn new(closure: GcObject, ip: *const u8, fp: usize) -> Self {
-        Self {
-            closure_obj: closure,
-            ip,
-            fp,
-        }
-    }
-
-    fn dummy(gc: &mut GarbageCollector) -> Self {
-        Self::new(gc.intern_string("<dummy-frame>".to_string()), null(), 0)
-    }
-
-    #[inline(always)]
-    fn closure(&self) -> GcRef<Closure> {
-        obj_as!(Closure from self.closure_obj)
-    }
 }
 
 type InterpretResult = Result<(), InterpretError>;
@@ -835,5 +809,33 @@ impl VM {
 
     fn stack_apply(&mut self, func: impl FnOnce(Value) -> Value) {
         *self.stack.top_mut() = func(self.stack.top_mut().clone());
+    }
+}
+
+/// Keeps info about the currently execution function.
+pub(crate) struct CallFrame {
+    pub closure_obj: GcObject,
+    /// Instruction pointer
+    ip: *const u8,
+    /// Frame/base pointer
+    fp: usize,
+}
+
+impl CallFrame {
+    fn new(closure: GcObject, ip: *const u8, fp: usize) -> Self {
+        Self {
+            closure_obj: closure,
+            ip,
+            fp,
+        }
+    }
+
+    fn dummy(gc: &mut GarbageCollector) -> Self {
+        Self::new(gc.intern_string("<dummy-frame>".to_string()), null(), 0)
+    }
+
+    #[inline(always)]
+    fn closure(&self) -> GcRef<Closure> {
+        obj_as!(Closure from self.closure_obj)
     }
 }
