@@ -149,12 +149,12 @@ impl<'a> Parser<'a> {
         if cfg!(feature = "trace_codegen") && !self.had_error.clone().take() {
             let name = self.context_const().function.name;
             let name = if self.context_const().kind == FunctionType::Script {
-                format!("<script>")
+                "<script>".to_string()
             } else {
                 format!("<fn {}>", name)
             };
 
-            debug::disassemble_chunk(&self.chunk(), &name);
+            debug::disassemble_chunk(self.chunk(), &name);
         }
 
         self.context().function.arity = arity;
@@ -708,7 +708,7 @@ impl<'a> Parser<'a> {
     }
 
     fn this(&mut self) -> ParseResult {
-        if self.classes.len() == 0 {
+        if self.classes.is_empty() {
             self.error("Cannot use 'this' outside of a class.");
         }
         self.variable(false)?;
@@ -1027,7 +1027,7 @@ impl<'a> Parser<'a> {
             Some(self.contexts[context_idx].add_up_value(index, true))
         } else {
             self.resolve_upvalue(context_idx - 1, name)
-                .and_then(|index| Some(self.contexts[context_idx].add_up_value(index, false)))
+                .map(|index| self.contexts[context_idx].add_up_value(index, false))
         }
     }
 
@@ -1057,7 +1057,7 @@ impl<'a> Parser<'a> {
             ..
         } = self.context_const();
 
-        for opcode in make_pop_for_locals(&locals, *scope_depth) {
+        for opcode in make_pop_for_locals(locals, *scope_depth) {
             self.emit_opcode(opcode);
             self.context().locals.pop();
         }

@@ -81,6 +81,12 @@ pub enum InterpretError {
 
 type InterpretResult = Result<(), InterpretError>;
 
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VM {
     /// Creates a new VM.
     pub fn new() -> Self {
@@ -643,7 +649,7 @@ impl VM {
 
         // Last opcode must be RETURN, otherwise it will cause UB(out-of-bounds)
         debug_assert!(
-            function.chunk.code.last().unwrap().clone() == OpCode::Return as u8,
+            *function.chunk.code.last().unwrap() == OpCode::Return as u8,
             "Last opcode of a chunk must be RETURN"
         );
 
@@ -804,11 +810,11 @@ impl VM {
 
     #[inline]
     fn peek(&self, distance: usize) -> Value {
-        self.stack[self.stack.len() - distance - 1].clone()
+        self.stack[self.stack.len() - distance - 1]
     }
 
     fn stack_apply(&mut self, func: impl FnOnce(Value) -> Value) {
-        *self.stack.top_mut() = func(self.stack.top_mut().clone());
+        *self.stack.top_mut() = func(*self.stack.top_mut());
     }
 }
 

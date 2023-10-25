@@ -6,7 +6,7 @@ pub type NativeResult = Result<Value, &'static str>;
 pub type NativeFunction = fn(&mut GarbageCollector, &mut [Value]) -> NativeResult;
 
 /// Native functions list: (name, function, arity)
-pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 9] = [
+pub static NATIVE_FUNCTIONS: [(&str, NativeFunction, u32); 9] = [
     ("clock", clock, 0),
     ("sleep", sleep, 1),
     ("string", string, 1),
@@ -21,7 +21,7 @@ pub static NATIVE_FUNCTIONS: [(&'static str, NativeFunction, u32); 9] = [
 // TODO refactor to make arguments passed more explicit and extracting them less verbose.
 
 fn clock(_: &mut GarbageCollector, args: &mut [Value]) -> NativeResult {
-    assert!(args.len() == 0);
+    assert!(args.is_empty());
 
     let sec = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)

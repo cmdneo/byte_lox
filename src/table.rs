@@ -55,7 +55,7 @@ impl<T: Clone + Copy> Table<T> {
     pub fn copy_from(&mut self, from: &Table<T>) {
         for entry in from.buckets.iter() {
             if let Bucket::Filled(entry) = entry {
-                self.insert(entry.key, entry.value.clone());
+                self.insert(entry.key, entry.value);
             }
         }
     }
