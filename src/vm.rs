@@ -51,24 +51,24 @@ pub struct VM {
     // a public function in VM itself for that and have the GC call it
     // but we do not want GC logic inside of the VM, so no.
     /// Stack for storing temporararies and local variables
-    pub stack: Stack<Value, STACK_MAX>,
+    pub(crate) stack: Stack<Value, STACK_MAX>,
     /// Enclosing call frames,
     // NOTE: The dummy call frame which was created is pushed as the first
     // entry into it when we start executing code, so it should be ignored.
-    pub call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
+    pub(crate) call_frames: Stack<CallFrame, CALL_DEPTH_MAX>,
     /// Currently active call frame.
     /// When no code is being executed it is a dummy value.
-    pub frame: CallFrame,
+    pub(crate) frame: CallFrame,
     /// Global variables table
-    pub globals: Table<Value>,
+    pub(crate) globals: Table<Value>,
     /// UpValues which are still on the stack, we track them in case
     /// we needed to share them with other closures.
     /// Keep the values ordered which simplifies popping the value when
     /// an open-upvalue is transformed to a closed-upvalue.
     /// Stores `location` and the associated upvalue as `GcObject`.
-    pub open_upvalues: BTreeMap<*const Value, GcObject>,
+    pub(crate) open_upvalues: BTreeMap<*const Value, GcObject>,
     /// Name of the method used as a constructor
-    pub init_string: GcObject,
+    pub(crate) init_string: GcObject,
     /// VM's mark and sweep garbage collector
     gc: GarbageCollector,
 }
@@ -78,7 +78,7 @@ pub enum InterpretError {
     Runtime,
 }
 
-pub struct CallFrame {
+pub(crate) struct CallFrame {
     pub closure_obj: GcObject,
     /// Instruction pointer
     ip: *const u8,
@@ -106,12 +106,6 @@ impl CallFrame {
 }
 
 type InterpretResult = Result<(), InterpretError>;
-
-impl Default for VM {
-    fn default() -> Self {
-        VM::new()
-    }
-}
 
 impl VM {
     /// Creates a new VM.

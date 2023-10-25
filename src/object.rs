@@ -105,11 +105,11 @@ impl ObjectKind {
     }
 }
 
-/// Generates a trivial `From` trait impl.
+/// Generates a trivial `From` trait impl for ObjectKind.
 /// Name of the variant and the name of the type contained inside
 /// the variant must be the same.
-macro_rules! objectkind_gen_from {
-    ($variant:ident) => {
+macro_rules! gen_impl_from {
+    (From<$variant:ident>) => {
         impl From<$variant> for ObjectKind {
             fn from(param: $variant) -> Self {
                 Self::$variant(param)
@@ -118,13 +118,13 @@ macro_rules! objectkind_gen_from {
     };
 }
 
-objectkind_gen_from!(Instance);
-objectkind_gen_from!(Class);
-objectkind_gen_from!(UpValue);
-objectkind_gen_from!(Function);
-objectkind_gen_from!(Closure);
-objectkind_gen_from!(BoundMethod);
-objectkind_gen_from!(Native);
+gen_impl_from!(From<Instance>);
+gen_impl_from!(From<Class>);
+gen_impl_from!(From<UpValue>);
+gen_impl_from!(From<Function>);
+gen_impl_from!(From<Closure>);
+gen_impl_from!(From<BoundMethod>);
+gen_impl_from!(From<Native>);
 
 impl From<String> for ObjectKind {
     fn from(lexeme: String) -> Self {

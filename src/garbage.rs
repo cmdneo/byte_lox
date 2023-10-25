@@ -1,3 +1,9 @@
+//! Includes:
+//! - The garbage collector(`GarbageCollector`).
+//! - A GC managed smart pointer(`GcObject`) which points to the heap allocated object.
+//!   This pointer is used for storing reference to objects.
+//! - `GcRef` and `GcRefMut` for obtaining references for reading/modifying objects stored.
+
 use std::{
     fmt,
     ops::{Deref, DerefMut},

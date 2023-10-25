@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, fmt, ops};
+use std::{
+    cmp::Ordering,
+    fmt,
+    ops::{Add, Div, Mul, Neg, Sub},
+};
 
 use crate::{
     garbage::{GcRef, GcRefMut},
@@ -16,6 +20,8 @@ pub enum Value {
     Object(GcObject),
 }
 
+// Some `is_*` and `as_*` methods may not be used, but are provided for consistency.
+#[allow(dead_code)]
 impl Value {
     pub fn nil() -> Self {
         Self::Nil
@@ -136,57 +142,29 @@ impl From<GcObject> for Value {
     }
 }
 
-impl ops::Add for Value {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        // Addition operator is supported for both string and numbers but
-        // when adding(concatenating) strings a new string object is created.
-        // The newly created string object needs to be created via the GC,
-        // hence adding strings is kept as a seperate operation where GC is accessible.
-        match (self, rhs) {
-            (Self::Number(x), Self::Number(y)) => Self::Number(x + y),
-            _ => unreachable!(),
+macro_rules! gen_impl_op {
+    (impl $trait:ident for Value using fn $fun:ident = $op:tt) => {
+        impl $trait for Value {
+            type Output = Value;
+            fn $fun(self, rhs: Self) -> Self::Output {
+                match (self, rhs) {
+                    (Self::Number(x), Self::Number(y)) => Self::Number(x $op y),
+                    (_, _)=> unreachable!(),
+                }
+            }
         }
-    }
+    };
 }
 
-impl ops::Sub for Value {
+// NOTE: Strings are added using `strings::add_strings` because they need
+// to be allocated, which requires the GC. This one only adds numbers.
+gen_impl_op!(impl Add for Value using fn add = +);
+gen_impl_op!(impl Sub for Value using fn sub = -);
+gen_impl_op!(impl Mul for Value using fn mul = *);
+gen_impl_op!(impl Div for Value using fn div = /);
+
+impl Neg for Value {
     type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Number(x), Self::Number(y)) => Self::Number(x - y),
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl ops::Mul for Value {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Number(x), Self::Number(y)) => Self::Number(x * y),
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl ops::Div for Value {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Number(x), Self::Number(y)) => Self::Number(x / y),
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl ops::Neg for Value {
-    type Output = Self;
-
     fn neg(self) -> Self::Output {
         match self {
             Self::Number(x) => Self::Number(-x),
